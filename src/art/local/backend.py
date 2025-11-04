@@ -148,6 +148,10 @@ class LocalBackend(Backend):
                 from ..torchtune.service import TorchtuneService
 
                 service_class = TorchtuneService
+            elif config.get("_use_pipeline_rl", False):
+                from .pipeline_rl_service import PipelineRLService
+
+                service_class = PipelineRLService
             else:
                 from ..unsloth.service import UnslothService
 

@@ -125,6 +125,7 @@ class InternalModelConfig(TypedDict, total=False):
     tinker_args: "TinkerArgs | None"
     trainer_args: "TrainerArgs"
     torchtune_args: TorchtuneArgs | None
+    _use_pipeline_rl: bool
 
 
 class TinkerArgs(TypedDict, total=False):

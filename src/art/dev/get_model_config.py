@@ -80,4 +80,5 @@ def get_model_config(
         tinker_args=config.get("tinker_args"),
         trainer_args=trainer_args,
         torchtune_args=torchtune_args,
+        _use_pipeline_rl=config.get("_use_pipeline_rl", False),
     )
