@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime
 import json
+import logging
 import math
 import os
 import subprocess
@@ -56,6 +57,8 @@ from .checkpoints import (
     delete_checkpoints,
 )
 from .service import ModelService
+
+logger = logging.getLogger(__name__)
 
 
 class LocalBackend(Backend):
@@ -166,6 +169,88 @@ class LocalBackend(Backend):
                     process_name="tinker-service" if is_tinker else "model-service",
                 )
         return self._services[model.name]
+
+    def _get_free_port(self) -> int:
+        """
+        Find a free TCP port for process group initialization.
+
+        Returns:
+            int: A free port number
+        """
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+        return port
+
+    async def _init_process_group_for_weight_updates(
+        self,
+        model: TrainableModel,
+        num_actor_gpus: int,
+    ) -> tuple[str, int]:
+        """
+        Initialize process group for weight updates (Phase 1: setup infrastructure).
+
+        This creates the TCP rendezvous endpoint that will be used by both the trainer
+        and vLLM to coordinate weight updates via NCCL.
+
+        Args:
+            model: The trainable model
+            num_actor_gpus: Number of GPUs dedicated to vLLM generation
+
+        Returns:
+            tuple: (init_method, world_size) for process group initialization
+        """
+        # Get free port for TCP rendezvous
+        port = self._get_free_port()
+        init_method = f"tcp://localhost:{port}"
+        world_size = 1 + num_actor_gpus  # trainer (1) + actor GPUs
+
+        logger.info("[INIT_PG] Step 1: Creating TCP endpoint")
+        logger.info(f"[INIT_PG]   init_method: {init_method}")
+        logger.info(f"[INIT_PG]   world_size: {world_size}")
+        logger.info(f"[INIT_PG]   num_actor_gpus: {num_actor_gpus}")
+
+        # Return init_method for vLLM to use
+        # Trainer will join after vLLM starts
+        return init_method, world_size
+
+    async def _join_process_group_as_trainer(
+        self,
+        init_method: str,
+        world_size: int,
+    ) -> torch.distributed.ProcessGroup:
+        """
+        Join process group as trainer (rank 0).
+
+        This should be called AFTER vLLM has started and is waiting to join
+        the process group. The vLLM process will block until this method
+        is called.
+
+        Args:
+            init_method: TCP endpoint (e.g., "tcp://localhost:12345")
+            world_size: Total processes in group
+
+        Returns:
+            ProcessGroup: The initialized NCCL process group
+        """
+        from .torch_utils import init_extra_process_group
+
+        logger.info("[INIT_PG] Step 4: Trainer joining process group as rank 0")
+        logger.info(f"[INIT_PG]   This will BLOCK until vLLM joins...")
+
+        pg = init_extra_process_group(
+            backend="nccl",
+            init_method=init_method,
+            rank=0,
+            world_size=world_size,
+            group_name="actor",
+        )
+
+        logger.info("[INIT_PG] Step 5: Process group initialized successfully!")
+        return pg
 
     def _get_packed_tensors(
         self,
