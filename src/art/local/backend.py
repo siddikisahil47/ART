@@ -84,6 +84,7 @@ class LocalBackend(Backend):
         self._image_processors: dict[str, BaseImageProcessor | None] = {}
         self._wandb_runs: dict[str, Run] = {}
         self._weave_clients: dict[str, WeaveClient] = {}
+        self._actor_update_group: torch.distributed.ProcessGroup | None = None
 
     def __enter__(self) -> Self:
         return self
@@ -255,6 +256,63 @@ class LocalBackend(Backend):
 
         logger.info("[INIT_PG] Step 5: Process group initialized successfully!")
         return pg
+
+    async def _wait_for_vllm_ready(self, base_url: str, timeout: float = 120.0) -> None:
+        """
+        Wait for vLLM server to be ready by polling the /v1/models endpoint.
+
+        Args:
+            base_url: Base URL of the vLLM server (e.g., "http://localhost:8000")
+            timeout: Maximum time to wait in seconds (default: 120)
+
+        Raises:
+            TimeoutError: If server doesn't become ready within timeout
+        """
+        logger.info(f"[WAIT_VLLM] Waiting for vLLM server at {base_url} to be ready...")
+        logger.info(f"[WAIT_VLLM]   Timeout: {timeout}s")
+
+        import time
+
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
+        start_time = time.time()
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise TimeoutError(
+                    f"vLLM server at {base_url} did not become ready within {timeout}s. "
+                    f"Check the vLLM logs in the model output directory."
+                )
+
+            try:
+                # Try to list models - this will succeed when vLLM is ready
+                logger.info(
+                    f"[WAIT_VLLM]   Attempting to list models (elapsed: {elapsed:.1f}s)..."
+                )
+                models = await client.models.list()
+
+                # Try to iterate and get model IDs
+                model_ids = []
+                try:
+                    # models might be a Page object or SyncPage, need to handle iteration carefully
+                    async for model in models:
+                        model_ids.append(model.id)
+                except TypeError:
+                    # Not async iterable, try regular iteration
+                    for model in models:
+                        model_ids.append(model.id)
+
+                # If we successfully got models, vLLM is ready
+                logger.info(f"[WAIT_VLLM] vLLM is ready! Available models: {model_ids}")
+                return
+            except Exception as e:
+                # vLLM not ready yet, wait and retry
+                logger.info(
+                    f"[WAIT_VLLM]   Not ready yet ({elapsed:.1f}s): {type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(0.5)
 
     def _get_packed_tensors(
         self,
@@ -633,6 +691,163 @@ class LocalBackend(Backend):
         self._log_metrics(model, data, "train", step=current_step)
         if verbose:
             print("_train_model complete")
+
+    async def _pipeline_rl_train(
+        self,
+        model: TrainableModel,
+        trajectory_groups_list: list[list[TrajectoryGroup]],
+        config: TrainConfig,
+        dev_config: dev.TrainConfig,
+        num_actor_gpus: int = 1,
+        max_step_lag: int = 5,
+        base_url: str = "http://localhost:8000",
+    ) -> AsyncIterator[dict[str, float]]:
+        """
+        PipelineRL training (Phase 1: Sequential with LoRA swapping).
+
+        This is a sequential implementation that establishes the foundation for
+        concurrent PipelineRL training. It follows the pattern:
+        1. Start vLLM with process group support
+        2. For each training iteration:
+           a. Generate trajectories (blocking)
+           b. Train on trajectories (blocking)
+           c. Save LoRA checkpoint
+           d. Swap LoRA in vLLM (via HTTP API)
+           e. Repeat
+
+        This is NOT concurrent yet, but establishes the patterns for Phase 2.
+
+        Args:
+            model: The trainable model
+            trajectory_groups_list: List of trajectory groups for each iteration
+            config: Training configuration
+            dev_config: Developer configuration
+            num_actor_gpus: Number of GPUs for vLLM (default: 1)
+            max_step_lag: Max steps ahead generation can be (for lag tracking)
+            base_url: Base URL for vLLM server (default: http://localhost:8000)
+
+        Yields:
+            Training metrics for each gradient step
+        """
+        from .pipeline_rl_service import PipelineRLService
+
+        logger.info("[PIPELINE_RL] Starting Phase 1: Sequential Pipeline")
+        logger.info(f"[PIPELINE_RL]   num_actor_gpus: {num_actor_gpus}")
+        logger.info(f"[PIPELINE_RL]   max_step_lag: {max_step_lag}")
+        logger.info(f"[PIPELINE_RL]   base_url: {base_url}")
+        logger.info(f"[PIPELINE_RL]   num_iterations: {len(trajectory_groups_list)}")
+
+        # Step 1: Initialize process group infrastructure
+        logger.info("[PIPELINE_RL] Step 1: Initializing process group infrastructure")
+        init_method, world_size = await self._init_process_group_for_weight_updates(
+            model, num_actor_gpus
+        )
+
+        # Step 2: Get or create PipelineRLService
+        logger.info("[PIPELINE_RL] Step 2: Getting PipelineRLService")
+        service = await self._get_service(model)
+        if not isinstance(service, PipelineRLService):
+            raise TypeError(
+                f"Expected PipelineRLService, got {type(service).__name__}. "
+                "Make sure model._internal_config has _use_pipeline_rl=True"
+            )
+
+        # Step 3: Start vLLM with weight update support
+        logger.info("[PIPELINE_RL] Step 3: Starting vLLM with weight update support")
+        openai_config = dev_config.get("openai_server_config", None)
+        await service.start_openai_server_with_weight_updates(
+            config=openai_config,
+            init_method=init_method,
+            world_size=world_size,
+            actor_idx=0,
+        )
+
+        # Step 4: Join process group as trainer (MUST be before waiting for vLLM!)
+        # vLLM is blocking during startup waiting for trainer to join
+        logger.info("[PIPELINE_RL] Step 4: Joining process group as trainer")
+        logger.info("[PIPELINE_RL]   This will unblock vLLM startup...")
+        self._actor_update_group = await self._join_process_group_as_trainer(
+            init_method, world_size
+        )
+
+        # Step 5: Wait for vLLM HTTP server to be ready
+        logger.info("[PIPELINE_RL] Step 5: Waiting for vLLM HTTP server to be ready")
+        await self._wait_for_vllm_ready(base_url, timeout=120.0)
+        logger.info("[PIPELINE_RL] vLLM is ready!")
+
+        # Step 6: Sequential training loop
+        logger.info("[PIPELINE_RL] Step 6: Starting sequential training loop")
+        for iteration, trajectory_groups in enumerate(trajectory_groups_list):
+            logger.info(f"[PIPELINE_RL] === Iteration {iteration} ===")
+            logger.info(f"[PIPELINE_RL]   Generation step: {service._generation_step}")
+            logger.info(f"[PIPELINE_RL]   Training step: {service._training_step}")
+            logger.info(
+                f"[PIPELINE_RL]   Lag: {service._generation_step - service._training_step}"
+            )
+
+            # Log trajectories
+            logger.info(
+                f"[PIPELINE_RL] Logging {len(trajectory_groups)} trajectory groups..."
+            )
+            await self._log(model, trajectory_groups, "train")
+
+            # Pack tensors (reuse existing ART functionality)
+            logger.info(
+                f"[PIPELINE_RL] Packing {len(trajectory_groups)} trajectory groups..."
+            )
+            packed_tensors = self._get_packed_tensors(
+                model,
+                trajectory_groups,
+                advantage_balance=dev_config.get("advantage_balance", 0.0),
+                allow_training_without_logprobs=dev_config.get(
+                    "allow_training_without_logprobs", False
+                ),
+                scale_rewards=dev_config.get("scale_rewards", True),
+                plot_tensors=dev_config.get("plot_tensors", False),
+            )
+
+            if packed_tensors is None:
+                logger.warning("[PIPELINE_RL] No suitable training data, skipping...")
+                continue
+
+            disk_packed_tensors = packed_tensors_to_dir(
+                packed_tensors,
+                f"{get_model_dir(model=model, art_path=self._path)}/tensors",
+            )
+
+            # Train on batch
+            logger.info(f"[PIPELINE_RL] Training on batch...")
+            async for metrics in service.train(disk_packed_tensors, config, dev_config):
+                logger.info(f"[PIPELINE_RL]   Training metrics: {metrics}")
+                yield metrics
+
+            # Get checkpoint directory (service.train() already saved it)
+            next_step = self.__get_step(model)
+            checkpoint_dir = get_step_checkpoint_dir(
+                get_model_dir(model=model, art_path=self._path), next_step
+            )
+            logger.info(f"[PIPELINE_RL] Checkpoint saved at: {checkpoint_dir}")
+
+            # Swap LoRA in vLLM (Phase 1 approach: use HTTP API)
+            logger.info(f"[PIPELINE_RL] Swapping LoRA checkpoint...")
+            await service.swap_lora_checkpoint(checkpoint_dir, base_url=base_url)
+
+            service._generation_step += 1
+            service._training_step += 1
+
+            # Check lag
+            lag = service._generation_step - service._training_step
+            logger.info(
+                f"[PIPELINE_RL] Current lag: {lag} (max allowed: {max_step_lag})"
+            )
+
+            if lag >= max_step_lag:
+                logger.warning(
+                    f"[PIPELINE_RL] Generation is {lag} steps ahead, "
+                    "would block in concurrent mode"
+                )
+
+        logger.info("[PIPELINE_RL] Training complete!")
 
     def _get_reward_std_dev_learning_rate_multiplier(
         self, model: TrainableModel

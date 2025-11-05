@@ -199,10 +199,108 @@ class PipelineRLService:
         logger.info(f"[PIPELINE_RL_SERVICE]   world_size: {world_size}")
         logger.info(f"[PIPELINE_RL_SERVICE]   actor_idx: {actor_idx}")
 
-        # TODO: Implement vLLM startup with weight update support
-        # This will launch the custom vllm_server.py script
-        raise NotImplementedError(
-            "start_openai_server_with_weight_updates not yet implemented"
+        # Get the path to the custom vllm_server.py script
+        import art
+
+        art_root = os.path.dirname(os.path.dirname(os.path.dirname(art.__file__)))
+        vllm_server_script = os.path.join(art_root, "dev/pipeline-rl/vllm_server.py")
+
+        if not os.path.exists(vllm_server_script):
+            raise FileNotFoundError(
+                f"vllm_server.py not found at {vllm_server_script}. "
+                "Make sure dev/pipeline-rl/vllm_server.py exists in the ART repository."
+            )
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE]   Using vllm_server.py at: {vllm_server_script}"
+        )
+
+        # Get server configuration
+        server_config = config or {}
+        server_args = server_config.get("server_args", {})
+        host = server_args.get("host", "0.0.0.0")
+        port = server_args.get("port", 8000)
+
+        # Determine model path (use last checkpoint if exists, otherwise base model)
+        from ..local.checkpoints import get_last_checkpoint_dir
+
+        checkpoint_dir = get_last_checkpoint_dir(self.output_dir)
+        if checkpoint_dir:
+            logger.info(
+                f"[PIPELINE_RL_SERVICE]   Loading from checkpoint: {checkpoint_dir}"
+            )
+            model_path = checkpoint_dir
+        else:
+            logger.info(
+                f"[PIPELINE_RL_SERVICE]   Loading base model: {self.base_model}"
+            )
+            model_path = self.base_model
+
+        # Build command to launch vllm_server.py
+        cmd = [
+            "uv",
+            "run",
+            vllm_server_script,
+            "--model",
+            model_path,
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--weight-update-group-init-method",
+            init_method,
+            "--weight-update-group-world-size",
+            str(world_size),
+            "--actor-llm-idx",
+            str(actor_idx),
+        ]
+
+        # Add optional server args from config
+        if "max_model_len" in server_args:
+            cmd.extend(["--max-model-len", str(server_args["max_model_len"])])
+        if "gpu_memory_utilization" in server_args:
+            cmd.extend(
+                ["--gpu-memory-utilization", str(server_args["gpu_memory_utilization"])]
+            )
+        if "tensor_parallel_size" in server_args:
+            cmd.extend(
+                ["--tensor-parallel-size", str(server_args["tensor_parallel_size"])]
+            )
+
+        # Add log directory if specified
+        log_dir = os.path.join(self.output_dir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        cmd.extend(["--log-dir", log_dir])
+
+        logger.info(f"[PIPELINE_RL_SERVICE] Launching vLLM with command:")
+        logger.info(f"[PIPELINE_RL_SERVICE]   {' '.join(cmd)}")
+
+        # Prepare environment for vLLM subprocess
+        # We need to control which GPUs vLLM sees via CUDA_VISIBLE_DEVICES
+        vllm_env = os.environ.copy()
+
+        # Set CUDA_VISIBLE_DEVICES to only the first GPU for vLLM
+        # This ensures torch.cuda.device_count() returns 1 in vLLM
+        vllm_env["CUDA_VISIBLE_DEVICES"] = "0"
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Setting CUDA_VISIBLE_DEVICES=0 for vLLM subprocess"
+        )
+
+        # Start the vLLM server process
+        # Note: This will block during startup until the trainer joins the process group
+        self._vllm_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=vllm_env,
+        )
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] vLLM process started (PID: {self._vllm_process.pid})"
+        )
+        logger.info(
+            "[PIPELINE_RL_SERVICE] vLLM will block during startup until trainer joins process group"
         )
 
     async def vllm_engine_is_sleeping(self) -> bool:
@@ -354,20 +452,79 @@ class PipelineRLService:
         self._state.trainer.save_model(checkpoint_dir)
 
         logger.info(f"[PIPELINE_RL_SERVICE] Saved checkpoint to {checkpoint_dir}")
-        logger.info(f"[PIPELINE_RL_SERVICE] Completed training step {self._training_step}")
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Completed training step {self._training_step}"
+        )
 
-    async def swap_lora_checkpoint(self, checkpoint_dir: str) -> None:
+    async def swap_lora_checkpoint(
+        self, checkpoint_dir: str, base_url: str = "http://localhost:8000"
+    ) -> None:
         """
         Swap LoRA adapter after training (Phase 1 approach).
 
-        This uses the existing vLLM LoRA swapping mechanism, which briefly
-        pauses generation to load the new checkpoint.
+        This uses the existing vLLM LoRA swapping mechanism via HTTP API,
+        which briefly pauses generation to load the new checkpoint.
 
         Args:
             checkpoint_dir: Path to the new LoRA checkpoint
+            base_url: Base URL of the vLLM server
         """
-        logger.info(f"[PIPELINE_RL_SERVICE] Swapping to checkpoint: {checkpoint_dir}")
+        logger.info(f"[LORA_SWAP] Swapping to checkpoint: {checkpoint_dir}")
+        logger.info(f"[LORA_SWAP] vLLM server URL: {base_url}")
 
-        # TODO: Implement LoRA swapping via vLLM API
-        # This will use vLLM's remove_lora() and add_lora() methods
-        raise NotImplementedError("swap_lora_checkpoint not yet implemented")
+        import aiohttp
+
+        # vLLM's LoRA management endpoints
+        # See: https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#lora-adapters
+        load_lora_url = f"{base_url}/v1/load_lora_adapter"
+        unload_lora_url = f"{base_url}/v1/unload_lora_adapter"
+
+        async with aiohttp.ClientSession() as session:
+            # Step 1: Unload old LoRA (adapter ID 1)
+            logger.info("[LORA_SWAP] Step 1: Unloading old LoRA adapter (ID: 1)")
+            try:
+                async with session.post(
+                    unload_lora_url,
+                    json={"lora_int_id": 1},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        logger.info("[LORA_SWAP]   Old LoRA unloaded successfully")
+                    else:
+                        error_text = await response.text()
+                        # It's OK if the LoRA doesn't exist (first time)
+                        if "not found" in error_text.lower():
+                            logger.info(
+                                "[LORA_SWAP]   No existing LoRA to unload (first swap)"
+                            )
+                        else:
+                            logger.warning(
+                                f"[LORA_SWAP]   Failed to unload LoRA: {error_text}"
+                            )
+            except Exception as e:
+                logger.warning(
+                    f"[LORA_SWAP]   Error unloading LoRA: {e}. Continuing..."
+                )
+
+            # Step 2: Load new LoRA
+            logger.info(f"[LORA_SWAP] Step 2: Loading new LoRA from {checkpoint_dir}")
+            try:
+                async with session.post(
+                    load_lora_url,
+                    json={
+                        "lora_name": self.model_name,
+                        "lora_int_id": 1,
+                        "lora_path": checkpoint_dir,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status == 200:
+                        logger.info("[LORA_SWAP]   New LoRA loaded successfully")
+                    else:
+                        error_text = await response.text()
+                        raise RuntimeError(f"Failed to load new LoRA: {error_text}")
+            except Exception as e:
+                logger.error(f"[LORA_SWAP]   Failed to load new LoRA: {e}")
+                raise
+
+        logger.info(f"[LORA_SWAP] Swap complete!")
