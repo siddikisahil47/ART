@@ -148,6 +148,7 @@ async def main():
                 load_in_4bit=False,
                 load_in_8bit=False,
                 fast_inference=False,  # Don't load vLLM via Unsloth (we manage it separately)
+                device_map="cuda:1",  # Force training to use GPU 1 only (vLLM uses GPU 0)
             ),
             peft_args=PeftArgs(r=1, lora_alpha=32),
             trainer_args=TrainerArgs(
