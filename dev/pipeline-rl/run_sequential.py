@@ -132,8 +132,8 @@ async def main():
     logger.info("  - LoRA checkpoint swapping")
     logger.info("")
 
-    # Initialize backend (use in_process=True for Phase 1)
-    backend = LocalBackend(in_process=True)
+    # Initialize backend
+    backend = LocalBackend()
 
     # Create trainable model with PipelineRL config
     logger.info("[1] Creating trainable model with PipelineRL configuration...")

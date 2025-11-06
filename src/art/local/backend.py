@@ -746,11 +746,6 @@ class LocalBackend(Backend):
         # Step 2: Get or create PipelineRLService
         logger.info("[PIPELINE_RL] Step 2: Getting PipelineRLService")
         service = await self._get_service(model)
-        if not isinstance(service, PipelineRLService):
-            raise TypeError(
-                f"Expected PipelineRLService, got {type(service).__name__}. "
-                "Make sure model._internal_config has _use_pipeline_rl=True"
-            )
 
         # Step 3: Start vLLM with weight update support
         logger.info("[PIPELINE_RL] Step 3: Starting vLLM with weight update support")
