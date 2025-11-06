@@ -146,7 +146,8 @@ async def main():
             init_args=InitArgs(
                 max_seq_length=1024,  # AssertionError: Sequence length (512) must be evenly divisible by chunk size (1024)
                 load_in_4bit=False,
-                fast_inference=False # Don't load vLLM via Unsloth (we manage it separately)
+                load_in_8bit=False,
+                fast_inference=False,  # Don't load vLLM via Unsloth (we manage it separately)
             ),
             peft_args=PeftArgs(r=1, lora_alpha=32),
             trainer_args=TrainerArgs(
