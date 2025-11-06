@@ -298,6 +298,7 @@ class PipelineRLService:
             str(world_size),
             "--actor-llm-idx",
             str(actor_idx),
+            "--enable-lora",
         ]
 
         # Add optional server args from config
@@ -311,6 +312,12 @@ class PipelineRLService:
             cmd.extend(
                 ["--tensor-parallel-size", str(server_args["tensor_parallel_size"])]
             )
+
+        # Add LoRA configuration from config (optional, with defaults)
+        max_loras = server_args.get("max_loras", 1)
+        max_lora_rank = server_args.get("max_lora_rank", 8)
+        cmd.extend(["--max-loras", str(max_loras)])
+        cmd.extend(["--max-lora-rank", str(max_lora_rank)])
 
         # Add log directory if specified
         log_dir = os.path.join(self.output_dir, "logs")
@@ -329,6 +336,12 @@ class PipelineRLService:
         vllm_env["CUDA_VISIBLE_DEVICES"] = inference_gpu_str
         logger.info(
             f"[PIPELINE_RL_SERVICE] Setting CUDA_VISIBLE_DEVICES={inference_gpu_str} for vLLM subprocess"
+        )
+
+        # Enable runtime LoRA updating (required for Phase 1 LoRA swapping)
+        vllm_env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Setting VLLM_ALLOW_RUNTIME_LORA_UPDATING=True"
         )
 
         # Start the vLLM server process
@@ -530,49 +543,98 @@ class PipelineRLService:
         unload_lora_url = f"{base_url}/v1/unload_lora_adapter"
 
         async with aiohttp.ClientSession() as session:
-            # Step 1: Unload old LoRA (adapter ID 1)
-            logger.info("[LORA_SWAP] Step 1: Unloading old LoRA adapter (ID: 1)")
+            # Step 1: Unload old LoRA (adapter name + ID)
+            logger.info(
+                f"[LORA_SWAP] Step 1: Unloading old LoRA adapter '{self.model_name}' (ID: 1)"
+            )
             try:
                 async with session.post(
                     unload_lora_url,
-                    json={"lora_int_id": 1},
+                    json={
+                        "lora_name": self.model_name,  # Required by vLLM API
+                        "lora_int_id": 1,
+                    },
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
+                    response_text = await response.text()
+                    logger.info(
+                        f"[LORA_SWAP]   Unload response status: {response.status}"
+                    )
+                    logger.info(f"[LORA_SWAP]   Unload response text: {response_text}")
+
                     if response.status == 200:
                         logger.info("[LORA_SWAP]   Old LoRA unloaded successfully")
                     else:
-                        error_text = await response.text()
                         # It's OK if the LoRA doesn't exist (first time)
-                        if "not found" in error_text.lower():
+                        if (
+                            "not found" in response_text.lower()
+                            or "not loaded" in response_text.lower()
+                        ):
                             logger.info(
                                 "[LORA_SWAP]   No existing LoRA to unload (first swap)"
                             )
                         else:
                             logger.warning(
-                                f"[LORA_SWAP]   Failed to unload LoRA: {error_text}"
+                                f"[LORA_SWAP]   Failed to unload LoRA (non-fatal): {response_text}"
                             )
             except Exception as e:
                 logger.warning(
-                    f"[LORA_SWAP]   Error unloading LoRA: {e}. Continuing..."
+                    f"[LORA_SWAP]   Error unloading LoRA (continuing anyway): {e}"
                 )
 
             # Step 2: Load new LoRA
             logger.info(f"[LORA_SWAP] Step 2: Loading new LoRA from {checkpoint_dir}")
+
+            # Verify checkpoint directory exists and has required files
+            logger.info(f"[LORA_SWAP]   Checking checkpoint directory...")
+            if not os.path.exists(checkpoint_dir):
+                raise RuntimeError(
+                    f"Checkpoint directory does not exist: {checkpoint_dir}"
+                )
+
+            checkpoint_files = os.listdir(checkpoint_dir)
+            logger.info(
+                f"[LORA_SWAP]   Checkpoint directory contents: {checkpoint_files}"
+            )
+
+            # Check for required LoRA files
+            has_adapter_config = "adapter_config.json" in checkpoint_files
+            has_adapter_model = any(
+                f.startswith("adapter_model") for f in checkpoint_files
+            )
+            logger.info(f"[LORA_SWAP]   Has adapter_config.json: {has_adapter_config}")
+            logger.info(f"[LORA_SWAP]   Has adapter_model files: {has_adapter_model}")
+
+            if not has_adapter_config or not has_adapter_model:
+                logger.warning(
+                    f"[LORA_SWAP]   Checkpoint directory missing required LoRA files!"
+                )
+
+            # Prepare request payload
+            payload = {
+                "lora_name": self.model_name,
+                "lora_int_id": 1,
+                "lora_path": checkpoint_dir,
+            }
+            logger.info(f"[LORA_SWAP]   Request URL: {load_lora_url}")
+            logger.info(f"[LORA_SWAP]   Request payload: {payload}")
+
             try:
                 async with session.post(
                     load_lora_url,
-                    json={
-                        "lora_name": self.model_name,
-                        "lora_int_id": 1,
-                        "lora_path": checkpoint_dir,
-                    },
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as response:
+                    response_text = await response.text()
+                    logger.info(f"[LORA_SWAP]   Response status: {response.status}")
+                    logger.info(f"[LORA_SWAP]   Response text: {response_text}")
+
                     if response.status == 200:
                         logger.info("[LORA_SWAP]   New LoRA loaded successfully")
                     else:
-                        error_text = await response.text()
-                        raise RuntimeError(f"Failed to load new LoRA: {error_text}")
+                        raise RuntimeError(
+                            f"Failed to load new LoRA (status {response.status}): {response_text}"
+                        )
             except Exception as e:
                 logger.error(f"[LORA_SWAP]   Failed to load new LoRA: {e}")
                 raise
