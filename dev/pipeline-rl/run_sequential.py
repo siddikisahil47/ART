@@ -148,7 +148,6 @@ async def main():
                 load_in_4bit=False,
                 load_in_8bit=False,
                 fast_inference=False,  # Don't load vLLM via Unsloth (we manage it separately)
-                device_map="cuda:1",  # Force training to use GPU 1 only (vLLM uses GPU 0)
             ),
             peft_args=PeftArgs(r=1, lora_alpha=32),
             trainer_args=TrainerArgs(
@@ -192,8 +191,16 @@ async def main():
         allow_training_without_logprobs=True, # there is no logprobs since we are using dummy trajactories
     )
 
+    # Configure GPU assignment
+    # Example: inference_gpu_ids=[0, 1, 2, 3, 4, 5], trainer_gpu_ids=[6, 7]
+    inference_gpu_ids = [0]  # vLLM uses GPU 0
+    trainer_gpu_ids = [1]  # Unsloth uses GPU 1
+
     # Run PipelineRL training (sequential)
     logger.info("\n[4] Starting PipelineRL sequential training...")
+    logger.info("    GPU Configuration:")
+    logger.info(f"      - Inference GPUs (vLLM): {inference_gpu_ids}")
+    logger.info(f"      - Training GPUs (Unsloth): {trainer_gpu_ids}")
     logger.info("    This will:")
     logger.info("      - Start vLLM with process group support")
     logger.info("      - For each iteration:")
@@ -208,7 +215,8 @@ async def main():
         trajectory_groups_list=trajectory_groups_list,
         config=train_config,
         dev_config=dev_config,
-        num_actor_gpus=1,  # Single GPU for vLLM (GPU 0)
+        inference_gpu_ids=inference_gpu_ids,
+        trainer_gpu_ids=trainer_gpu_ids,
         max_step_lag=5,
         base_url="http://localhost:8000",
     ):

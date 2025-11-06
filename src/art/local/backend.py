@@ -698,7 +698,8 @@ class LocalBackend(Backend):
         trajectory_groups_list: list[list[TrajectoryGroup]],
         config: TrainConfig,
         dev_config: dev.TrainConfig,
-        num_actor_gpus: int = 1,
+        inference_gpu_ids: list[int] | None = None,
+        trainer_gpu_ids: list[int] | None = None,
         max_step_lag: int = 5,
         base_url: str = "http://localhost:8000",
     ) -> AsyncIterator[dict[str, float]]:
@@ -722,7 +723,8 @@ class LocalBackend(Backend):
             trajectory_groups_list: List of trajectory groups for each iteration
             config: Training configuration
             dev_config: Developer configuration
-            num_actor_gpus: Number of GPUs for vLLM (default: 1)
+            inference_gpu_ids: List of GPU IDs for vLLM inference (default: [0])
+            trainer_gpu_ids: List of GPU IDs for training (default: [1])
             max_step_lag: Max steps ahead generation can be (for lag tracking)
             base_url: Base URL for vLLM server (default: http://localhost:8000)
 
@@ -731,8 +733,17 @@ class LocalBackend(Backend):
         """
         from .pipeline_rl_service import PipelineRLService
 
+        # Set default GPU assignments if not provided
+        if inference_gpu_ids is None:
+            inference_gpu_ids = [0]
+        if trainer_gpu_ids is None:
+            trainer_gpu_ids = [1]
+
+        num_actor_gpus = len(inference_gpu_ids)
+
         logger.info("[PIPELINE_RL] Starting Phase 1: Sequential Pipeline")
-        logger.info(f"[PIPELINE_RL]   num_actor_gpus: {num_actor_gpus}")
+        logger.info(f"[PIPELINE_RL]   inference_gpu_ids: {inference_gpu_ids}")
+        logger.info(f"[PIPELINE_RL]   trainer_gpu_ids: {trainer_gpu_ids}")
         logger.info(f"[PIPELINE_RL]   max_step_lag: {max_step_lag}")
         logger.info(f"[PIPELINE_RL]   base_url: {base_url}")
         logger.info(f"[PIPELINE_RL]   num_iterations: {len(trajectory_groups_list)}")
@@ -744,8 +755,43 @@ class LocalBackend(Backend):
         )
 
         # Step 2: Get or create PipelineRLService
+        # We need to set CUDA_VISIBLE_DEVICES *before* creating the service
+        # because @mp_actors.move creates a subprocess that inherits the environment.
+        # Setting it inside the subprocess is too late (CUDA already initialized).
         logger.info("[PIPELINE_RL] Step 2: Getting PipelineRLService")
-        service = await self._get_service(model)
+        logger.info(
+            "[PIPELINE_RL]   Setting CUDA_VISIBLE_DEVICES for training subprocess..."
+        )
+
+        import os
+
+        # Save original environment
+        original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+        # Set CUDA_VISIBLE_DEVICES to only show trainer GPUs
+        # This will be inherited by the subprocess created by @mp_actors.move
+        trainer_gpu_str = ",".join(str(gpu_id) for gpu_id in trainer_gpu_ids)
+        os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu_str
+        logger.info(
+            f"[PIPELINE_RL]   Temporarily set CUDA_VISIBLE_DEVICES={trainer_gpu_str}"
+        )
+        logger.info(f"[PIPELINE_RL]   (original was: {original_cuda_visible})")
+
+        try:
+            # Create the service - subprocess inherits the modified environment
+            service = await self._get_service(model)
+            logger.info(
+                "[PIPELINE_RL]   PipelineRLService subprocess created successfully"
+            )
+        finally:
+            # Restore original environment for the main process
+            if original_cuda_visible is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+            else:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            logger.info(
+                f"[PIPELINE_RL]   Restored CUDA_VISIBLE_DEVICES to: {original_cuda_visible}"
+            )
 
         # Step 3: Start vLLM with weight update support
         logger.info("[PIPELINE_RL] Step 3: Starting vLLM with weight update support")
@@ -755,6 +801,7 @@ class LocalBackend(Backend):
             init_method=init_method,
             world_size=world_size,
             actor_idx=0,
+            inference_gpu_ids=inference_gpu_ids,
         )
 
         # Step 4: Join process group as trainer (MUST be before waiting for vLLM!)

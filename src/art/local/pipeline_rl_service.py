@@ -12,14 +12,18 @@ import os
 import subprocess
 from dataclasses import dataclass
 from functools import cached_property
-from typing import AsyncIterator, cast
+from typing import TYPE_CHECKING, AsyncIterator, cast
 
 import peft
-import torch
 from datasets import Dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils.dummy_pt_objects import GenerationMixin, PreTrainedModel
 from trl import GRPOConfig, GRPOTrainer
+
+# Import torch only for type checking to avoid CUDA initialization
+# The actual import happens in _state after setting CUDA_VISIBLE_DEVICES
+if TYPE_CHECKING:
+    import torch
 
 from .. import dev, types
 from ..local.checkpoints import get_last_checkpoint_dir
@@ -98,10 +102,23 @@ class PipelineRLService:
         """
         logger.info("[PIPELINE_RL_SERVICE] Initializing Unsloth state...")
 
+        # Import torch and unsloth
+        # Note: CUDA_VISIBLE_DEVICES was already set in the parent process before
+        # this subprocess was created, so we only see the training GPUs here
+        import torch
         import unsloth
 
-        # Initialize Unsloth model
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] CUDA_VISIBLE_DEVICES in subprocess: {os.environ.get('CUDA_VISIBLE_DEVICES')}"
+        )
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] torch.cuda.device_count() = {torch.cuda.device_count()}"
+        )
+
+        # Get init args
         init_args = self.config.get("init_args", {})
+
+        # Initialize Unsloth model
         checkpoint_dir = get_last_checkpoint_dir(self.output_dir)
         if checkpoint_dir:
             logger.info(f"[PIPELINE_RL_SERVICE] Loading from checkpoint: {checkpoint_dir}")
@@ -110,9 +127,22 @@ class PipelineRLService:
             logger.info(f"[PIPELINE_RL_SERVICE] Loading base model: {self.base_model}")
             init_args["model_name"] = self.base_model
 
+        # Since CUDA_VISIBLE_DEVICES masks GPUs, device 0 in this subprocess
+        # maps to the correct physical training GPU (assumes only 1 training GPU for now)
+        init_args["device_map"] = {"": 0}
+        torch.cuda.set_device(0)
+
+        logger.info(f"[PIPELINE_RL_SERVICE] Loading model on device 0 (masked view)")
+        logger.info(
+            f"[PIPELINE_RL_SERVICE]   device_map = {init_args.get('device_map')}"
+        )
         model, tokenizer = cast(
             tuple[CausalLM, PreTrainedTokenizerBase],
             unsloth.FastLanguageModel.from_pretrained(**init_args),
+        )
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Model loaded successfully on device: {model.device}"
         )
 
         # Initialize PEFT model
@@ -125,12 +155,21 @@ class PipelineRLService:
 
         # Initialize trainer with dummy dataset
         data = {"prompt": ""}
+
+        # Ensure device is set correctly before creating trainer
+        torch.cuda.set_device(0)
+        logger.info("[PIPELINE_RL_SERVICE] Creating trainer on device 0 (masked view)")
+
         trainer = GRPOTrainer(
             model=peft_model,  # type: ignore
             reward_funcs=[],
             args=GRPOConfig(**self.config.get("trainer_args", {})),  # type: ignore
             train_dataset=Dataset.from_list([data for _ in range(10_000_000)]),
             processing_class=tokenizer,
+        )
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Trainer created successfully on device: {trainer.args.device}"
         )
 
         # Initialize queues
@@ -184,6 +223,7 @@ class PipelineRLService:
         init_method: str,
         world_size: int,
         actor_idx: int = 0,
+        inference_gpu_ids: list[int] | None = None,
     ) -> None:
         """
         Start vLLM with weight update support for PipelineRL.
@@ -193,11 +233,16 @@ class PipelineRLService:
             init_method: TCP endpoint for process group (e.g., "tcp://localhost:12345")
             world_size: Total processes in weight update group (trainer + vLLM GPUs)
             actor_idx: Index of this actor (for multi-actor setups, default 0)
+            inference_gpu_ids: List of GPU IDs for vLLM inference (default: [0])
         """
+        if inference_gpu_ids is None:
+            inference_gpu_ids = [0]
+
         logger.info("[PIPELINE_RL_SERVICE] Starting vLLM with weight update support")
         logger.info(f"[PIPELINE_RL_SERVICE]   init_method: {init_method}")
         logger.info(f"[PIPELINE_RL_SERVICE]   world_size: {world_size}")
         logger.info(f"[PIPELINE_RL_SERVICE]   actor_idx: {actor_idx}")
+        logger.info(f"[PIPELINE_RL_SERVICE]   inference_gpu_ids: {inference_gpu_ids}")
 
         # Get the path to the custom vllm_server.py script
         import art
@@ -279,11 +324,11 @@ class PipelineRLService:
         # We need to control which GPUs vLLM sees via CUDA_VISIBLE_DEVICES
         vllm_env = os.environ.copy()
 
-        # Set CUDA_VISIBLE_DEVICES to only the first GPU for vLLM
-        # This ensures torch.cuda.device_count() returns 1 in vLLM
-        vllm_env["CUDA_VISIBLE_DEVICES"] = "0"
+        # Set CUDA_VISIBLE_DEVICES to only show inference GPUs for vLLM
+        inference_gpu_str = ",".join(str(gpu_id) for gpu_id in inference_gpu_ids)
+        vllm_env["CUDA_VISIBLE_DEVICES"] = inference_gpu_str
         logger.info(
-            f"[PIPELINE_RL_SERVICE] Setting CUDA_VISIBLE_DEVICES=0 for vLLM subprocess"
+            f"[PIPELINE_RL_SERVICE] Setting CUDA_VISIBLE_DEVICES={inference_gpu_str} for vLLM subprocess"
         )
 
         # Start the vLLM server process
@@ -329,7 +374,12 @@ class PipelineRLService:
 
         vLLM runs continuously on separate GPUs.
         """
-        logger.info(f"[PIPELINE_RL_SERVICE] Starting training step {self._training_step}")
+        # Import torch here (already imported in _state, but needed in this scope)
+        import torch
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Starting training step {self._training_step}"
+        )
 
         # Load packed tensors
         packed_tensors = packed_tensors_from_dir(**disk_packed_tensors)
