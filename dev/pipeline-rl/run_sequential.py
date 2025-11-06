@@ -144,13 +144,17 @@ async def main():
         _internal_config=InternalModelConfig(
             _use_pipeline_rl=True,  # Enable PipelineRLService
             init_args=InitArgs(
-                max_seq_length=1024, # AssertionError: Sequence length (512) must be evenly divisible by chunk size (1024)
+                max_seq_length=1024,  # AssertionError: Sequence length (512) must be evenly divisible by chunk size (1024)
                 load_in_4bit=False,
                 fast_inference=False # Don't load vLLM via Unsloth (we manage it separately)
             ),
             peft_args=PeftArgs(r=1, lora_alpha=32),
-            trainer_args=TrainerArgs(output_dir=".art/pipeline-rl-test", per_device_train_batch_size=2,
-                        gradient_accumulation_steps=1, num_train_epochs=1),
+            trainer_args=TrainerArgs(
+                output_dir=".art/pipeline-rl-test",
+                per_device_train_batch_size=2,
+                gradient_accumulation_steps=1,
+                num_train_epochs=1,
+            ),
         ),
     )
 
