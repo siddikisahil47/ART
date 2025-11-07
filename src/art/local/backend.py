@@ -6,7 +6,7 @@ import math
 import os
 import subprocess
 from types import TracebackType
-from typing import AsyncIterator, Literal, cast
+from typing import AsyncIterator, Callable, Literal, cast
 import warnings
 
 import aiohttp
@@ -696,7 +696,7 @@ class LocalBackend(Backend):
         self,
         model: TrainableModel,
         prompts: list[list[dict]],
-        reward_fn: callable,
+        reward_fn: Callable,
         base_url: str = "http://localhost:8000",
         generation_config: dict | None = None,
     ) -> list[TrajectoryGroup]:
@@ -813,38 +813,59 @@ class LocalBackend(Backend):
     async def _pipeline_rl_train(
         self,
         model: TrainableModel,
-        trajectory_groups_list: list[list[TrajectoryGroup]],
-        config: TrainConfig,
-        dev_config: dev.TrainConfig,
+        trajectory_groups_list: list[list[TrajectoryGroup]] | None = None,
+        config: TrainConfig | None = None,
+        dev_config: dev.TrainConfig | None = None,
         inference_gpu_ids: list[int] | None = None,
         trainer_gpu_ids: list[int] | None = None,
         max_step_lag: int = 5,
         base_url: str = "http://localhost:8000",
+        concurrent: bool = False,
+        prompt_generator: Callable | None = None,
+        reward_fn: Callable | None = None,
+        num_iterations: int | None = None,
+        num_groups: int = 20,
+        trajectories_per_group: int = 2,
     ) -> AsyncIterator[dict[str, float]]:
         """
-        PipelineRL training (Phase 1: Sequential with LoRA swapping).
+        PipelineRL training with optional concurrent mode.
 
-        This is a sequential implementation that establishes the foundation for
-        concurrent PipelineRL training. It follows the pattern:
+        Phase 1 (Sequential): Uses trajectory_groups_list, processes sequentially
+        Phase 2 (Concurrent): Uses prompt_generator + reward_fn, runs generation
+                              and training concurrently with backpressure
+
+        Sequential Mode:
         1. Start vLLM with process group support
         2. For each training iteration:
-           a. Generate trajectories (blocking)
+           a. Use pre-generated trajectory groups
            b. Train on trajectories (blocking)
            c. Save LoRA checkpoint
            d. Swap LoRA in vLLM (via HTTP API)
            e. Repeat
 
-        This is NOT concurrent yet, but establishes the patterns for Phase 2.
+        Concurrent Mode:
+        1. Start vLLM with process group support
+        2. Launch two concurrent tasks:
+           a. Generation task: continuously generates trajectories
+           b. Training task: continuously trains on incoming trajectories
+        3. Backpressure via max_step_lag prevents generation from getting too far ahead
+        4. LoRA swapping happens after each training step
 
         Args:
             model: The trainable model
-            trajectory_groups_list: List of trajectory groups for each iteration
+            trajectory_groups_list: List of trajectory groups (sequential mode only)
             config: Training configuration
             dev_config: Developer configuration
             inference_gpu_ids: List of GPU IDs for vLLM inference (default: [0])
             trainer_gpu_ids: List of GPU IDs for training (default: [1])
-            max_step_lag: Max steps ahead generation can be (for lag tracking)
+            max_step_lag: Max steps ahead generation can be (for backpressure)
             base_url: Base URL for vLLM server (default: http://localhost:8000)
+            concurrent: Enable concurrent mode (default: False)
+            prompt_generator: Generator function for prompts (concurrent mode only)
+            reward_fn: Reward function (prompt, response) -> float (concurrent mode)
+            num_iterations: Number of iterations for concurrent mode
+            num_groups: Number of trajectory groups per batch (concurrent mode)
+            trajectories_per_group: Number of trajectories per group (for advantage calc)
 
         Yields:
             Training metrics for each gradient step
@@ -859,12 +880,21 @@ class LocalBackend(Backend):
 
         num_actor_gpus = len(inference_gpu_ids)
 
-        logger.info("[PIPELINE_RL] Starting Phase 1: Sequential Pipeline")
+        mode = "Concurrent" if concurrent else "Sequential"
+        logger.info(f"[PIPELINE_RL] Starting {mode} Pipeline")
         logger.info(f"[PIPELINE_RL]   inference_gpu_ids: {inference_gpu_ids}")
         logger.info(f"[PIPELINE_RL]   trainer_gpu_ids: {trainer_gpu_ids}")
         logger.info(f"[PIPELINE_RL]   max_step_lag: {max_step_lag}")
         logger.info(f"[PIPELINE_RL]   base_url: {base_url}")
-        logger.info(f"[PIPELINE_RL]   num_iterations: {len(trajectory_groups_list)}")
+        if concurrent:
+            logger.info(f"[PIPELINE_RL]   num_iterations: {num_iterations}")
+            logger.info(
+                f"[PIPELINE_RL]   num_groups: {num_groups}, trajectories_per_group: {trajectories_per_group}"
+            )
+        else:
+            logger.info(
+                f"[PIPELINE_RL]   num_iterations: {len(trajectory_groups_list)}"
+            )
 
         # Step 1: Initialize process group infrastructure
         logger.info("[PIPELINE_RL] Step 1: Initializing process group infrastructure")
@@ -935,25 +965,68 @@ class LocalBackend(Backend):
         await self._wait_for_vllm_ready(base_url, timeout=120.0)
         logger.info("[PIPELINE_RL] vLLM is ready!")
 
-        # Step 6: Sequential training loop
-        logger.info("[PIPELINE_RL] Step 6: Starting sequential training loop")
+        # Step 6: Choose execution mode
+        if not concurrent:
+            # Sequential mode (Phase 1)
+            logger.info("[PIPELINE_RL] Step 6: Starting sequential training loop")
+            async for metrics in self._pipeline_rl_train_sequential(
+                model=model,
+                service=service,
+                trajectory_groups_list=trajectory_groups_list,
+                config=config,
+                dev_config=dev_config,
+                max_step_lag=max_step_lag,
+                base_url=base_url,
+            ):
+                yield metrics
+        else:
+            # Concurrent mode (Phase 2)
+            logger.info("[PIPELINE_RL] Step 6: Starting concurrent training pipeline")
+            async for metrics in self._pipeline_rl_train_concurrent(
+                model=model,
+                service=service,
+                prompt_generator=prompt_generator,
+                reward_fn=reward_fn,
+                config=config,
+                dev_config=dev_config,
+                num_iterations=num_iterations,
+                num_groups=num_groups,
+                trajectories_per_group=trajectories_per_group,
+                max_step_lag=max_step_lag,
+                base_url=base_url,
+            ):
+                yield metrics
+
+        logger.info("[PIPELINE_RL] Training complete!")
+
+    async def _pipeline_rl_train_sequential(
+        self,
+        model: TrainableModel,
+        service,
+        trajectory_groups_list: list[list[TrajectoryGroup]],
+        config: TrainConfig,
+        dev_config: dev.TrainConfig,
+        max_step_lag: int,
+        base_url: str,
+    ) -> AsyncIterator[dict[str, float]]:
+        """Sequential training loop (extracted from original implementation)."""
         for iteration, trajectory_groups in enumerate(trajectory_groups_list):
-            logger.info(f"[PIPELINE_RL] === Iteration {iteration} ===")
-            logger.info(f"[PIPELINE_RL]   Generation step: {service._generation_step}")
-            logger.info(f"[PIPELINE_RL]   Training step: {service._training_step}")
+            logger.info(f"[SEQUENTIAL] === Iteration {iteration} ===")
+            logger.info(f"[SEQUENTIAL]   Generation step: {service._generation_step}")
+            logger.info(f"[SEQUENTIAL]   Training step: {service._training_step}")
             logger.info(
-                f"[PIPELINE_RL]   Lag: {service._generation_step - service._training_step}"
+                f"[SEQUENTIAL]   Lag: {service._generation_step - service._training_step}"
             )
 
             # Log trajectories
             logger.info(
-                f"[PIPELINE_RL] Logging {len(trajectory_groups)} trajectory groups..."
+                f"[SEQUENTIAL] Logging {len(trajectory_groups)} trajectory groups..."
             )
             await self._log(model, trajectory_groups, "train")
 
             # Pack tensors (reuse existing ART functionality)
             logger.info(
-                f"[PIPELINE_RL] Packing {len(trajectory_groups)} trajectory groups..."
+                f"[SEQUENTIAL] Packing {len(trajectory_groups)} trajectory groups..."
             )
             packed_tensors = self._get_packed_tensors(
                 model,
@@ -967,7 +1040,7 @@ class LocalBackend(Backend):
             )
 
             if packed_tensors is None:
-                logger.warning("[PIPELINE_RL] No suitable training data, skipping...")
+                logger.warning("[SEQUENTIAL] No suitable training data, skipping...")
                 continue
 
             disk_packed_tensors = packed_tensors_to_dir(
@@ -976,9 +1049,9 @@ class LocalBackend(Backend):
             )
 
             # Train on batch
-            logger.info(f"[PIPELINE_RL] Training on batch...")
+            logger.info(f"[SEQUENTIAL] Training on batch...")
             async for metrics in service.train(disk_packed_tensors, config, dev_config):
-                logger.info(f"[PIPELINE_RL]   Training metrics: {metrics}")
+                logger.info(f"[SEQUENTIAL]   Training metrics: {metrics}")
                 yield metrics
 
             # Get checkpoint directory (service.train() already saved it)
@@ -986,10 +1059,10 @@ class LocalBackend(Backend):
             checkpoint_dir = get_step_checkpoint_dir(
                 get_model_dir(model=model, art_path=self._path), next_step
             )
-            logger.info(f"[PIPELINE_RL] Checkpoint saved at: {checkpoint_dir}")
+            logger.info(f"[SEQUENTIAL] Checkpoint saved at: {checkpoint_dir}")
 
             # Swap LoRA in vLLM (Phase 1 approach: use HTTP API)
-            logger.info(f"[PIPELINE_RL] Swapping LoRA checkpoint...")
+            logger.info(f"[SEQUENTIAL] Swapping LoRA checkpoint...")
             await service.swap_lora_checkpoint(checkpoint_dir, base_url=base_url)
 
             service._generation_step += 1
@@ -998,16 +1071,270 @@ class LocalBackend(Backend):
             # Check lag
             lag = service._generation_step - service._training_step
             logger.info(
-                f"[PIPELINE_RL] Current lag: {lag} (max allowed: {max_step_lag})"
+                f"[SEQUENTIAL] Current lag: {lag} (max allowed: {max_step_lag})"
             )
 
             if lag >= max_step_lag:
                 logger.warning(
-                    f"[PIPELINE_RL] Generation is {lag} steps ahead, "
+                    f"[SEQUENTIAL] Generation is {lag} steps ahead, "
                     "would block in concurrent mode"
                 )
 
-        logger.info("[PIPELINE_RL] Training complete!")
+    async def _pipeline_rl_train_concurrent(
+        self,
+        model: TrainableModel,
+        service,
+        prompt_generator: Callable,
+        reward_fn: Callable,
+        config: TrainConfig,
+        dev_config: dev.TrainConfig,
+        num_iterations: int,
+        num_groups: int,
+        trajectories_per_group: int,
+        max_step_lag: int,
+        base_url: str,
+    ) -> AsyncIterator[dict[str, float]]:
+        """
+        Concurrent training pipeline (Phase 2).
+
+        Runs two concurrent tasks:
+        1. Generation task: continuously generates trajectories
+        2. Training task: continuously trains on incoming trajectories
+
+        Backpressure via max_step_lag prevents generation from getting too far ahead.
+        """
+        from ..trajectories import Trajectory, TrajectoryGroup
+
+        logger.info("[CONCURRENT] Starting concurrent pipeline")
+        logger.info(f"[CONCURRENT]   num_iterations: {num_iterations}")
+        logger.info(f"[CONCURRENT]   num_groups: {num_groups}")
+        logger.info(f"[CONCURRENT]   trajectories_per_group: {trajectories_per_group}")
+        logger.info(
+            f"[CONCURRENT]   max_step_lag: {max_step_lag} (not used yet, TODO: implement proper policy lag tracking)"
+        )
+
+        # Create queue for trajectory flow
+        # Use reasonable queue size for backpressure (queue blocks when full)
+        queue_maxsize = 50
+        trajectory_queue: asyncio.Queue[list[TrajectoryGroup]] = asyncio.Queue(
+            maxsize=queue_maxsize
+        )
+        logger.info(f"[CONCURRENT]   trajectory_queue maxsize: {queue_maxsize}")
+
+        # Shared state for metrics yielding
+        metrics_queue: asyncio.Queue[dict[str, float]] = asyncio.Queue()
+
+        # Generation task (runs concurrently with training)
+        async def generation_task():
+            """Continuously generates trajectories and puts them in the queue."""
+            try:
+                for iteration in range(num_iterations):
+                    logger.info(
+                        f"[GENERATION] Starting generation step {service._generation_step}"
+                    )
+
+                    # Generate dummy trajectories for Step 2.2
+                    # TODO: Replace with real generation in Step 2.3
+                    logger.info(
+                        f"[GENERATION]   Creating {num_groups} trajectory groups with {trajectories_per_group} trajectories each..."
+                    )
+                    trajectory_groups = []
+
+                    for group_idx in range(num_groups):
+                        # Create multiple trajectories per group with varying rewards
+                        trajectories = []
+                        for traj_idx in range(trajectories_per_group):
+                            # Different rewards for ranking/advantage calculation
+                            rewards = [0.5, 0.75, 1.0]  # Vary rewards
+                            reward = rewards[traj_idx % len(rewards)]
+
+                            trajectory = Trajectory(
+                                messages_and_choices=[
+                                    {
+                                        "role": "user",
+                                        "content": f"Dummy prompt {iteration}-{group_idx}",
+                                    },
+                                    {
+                                        "role": "assistant",
+                                        "content": f"Dummy response {iteration}-{group_idx}-{traj_idx}",
+                                    },
+                                ],
+                                reward=reward,
+                                metadata={
+                                    "iteration": iteration,
+                                    "group_idx": group_idx,
+                                    "traj_idx": traj_idx,
+                                    "generation_step": service._generation_step,
+                                },
+                            )
+                            trajectories.append(trajectory)
+
+                        trajectory_group = TrajectoryGroup(trajectories)
+                        trajectory_groups.append(trajectory_group)
+
+                    logger.info(
+                        f"[GENERATION]   Created {len(trajectory_groups)} dummy trajectory groups"
+                    )
+
+                    # Put in queue (will block if queue is full - natural backpressure)
+                    logger.info(
+                        f"[GENERATION]   Putting trajectories in queue (queue size: {trajectory_queue.qsize()}/{queue_maxsize})"
+                    )
+                    await trajectory_queue.put(trajectory_groups)
+
+                    service._generation_step += 1
+                    logger.info(
+                        f"[GENERATION] Completed generation step {service._generation_step - 1}"
+                    )
+                    lag = service._training_step - service._generation_step
+                    logger.info(
+                        f"[GENERATION]   Step delta: {lag} (training - generation)"
+                    )
+
+                logger.info("[GENERATION] All generations complete, signaling end")
+                # Signal end by putting None
+                await trajectory_queue.put(None)
+
+            except Exception as e:
+                logger.error(f"[GENERATION] Error in generation task: {e}")
+                import traceback
+
+                traceback.print_exc()
+                raise
+
+        # Training task (runs concurrently with generation)
+        async def training_task():
+            """Continuously trains on trajectories from the queue."""
+            try:
+                while True:
+                    # Get trajectories from queue
+                    logger.info(
+                        f"[TRAINING] Waiting for trajectories (queue size: {trajectory_queue.qsize()}/{queue_maxsize})"
+                    )
+                    trajectory_groups = await trajectory_queue.get()
+
+                    # Check for end signal
+                    if trajectory_groups is None:
+                        logger.info("[TRAINING] Received end signal, stopping")
+                        trajectory_queue.task_done()
+                        break
+
+                    logger.info(
+                        f"[TRAINING] Starting training step {service._training_step}"
+                    )
+                    logger.info(
+                        f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups"
+                    )
+
+                    # Log trajectories
+                    await self._log(model, trajectory_groups, "train")
+
+                    # Pack tensors (same as sequential mode)
+                    logger.info(f"[TRAINING]   Packing trajectories...")
+                    packed_tensors = self._get_packed_tensors(
+                        model,
+                        trajectory_groups,
+                        advantage_balance=dev_config.get("advantage_balance", 0.0),
+                        allow_training_without_logprobs=dev_config.get(
+                            "allow_training_without_logprobs", False
+                        ),
+                        scale_rewards=dev_config.get("scale_rewards", True),
+                        plot_tensors=dev_config.get("plot_tensors", False),
+                    )
+
+                    if packed_tensors is None:
+                        logger.warning(
+                            "[TRAINING] No suitable training data, skipping..."
+                        )
+                        # Still increment training step
+                        service._training_step += 1
+                        trajectory_queue.task_done()
+
+                        lag = service._training_step - service._generation_step
+                        logger.info(
+                            f"[TRAINING] Skipped training step {service._training_step - 1}"
+                        )
+                        logger.info(
+                            f"[TRAINING]   Step delta: {lag} (training - generation)"
+                        )
+                        continue
+
+                    disk_packed_tensors = packed_tensors_to_dir(
+                        packed_tensors,
+                        f"{get_model_dir(model=model, art_path=self._path)}/tensors",
+                    )
+
+                    # Train on batch
+                    logger.info(f"[TRAINING]   Training...")
+                    async for metrics in service.train(
+                        disk_packed_tensors, config, dev_config
+                    ):
+                        logger.info(f"[TRAINING]     Metrics: {metrics}")
+                        # Put metrics in queue to be yielded by main coroutine
+                        await metrics_queue.put(metrics)
+
+                    # Get checkpoint directory (service.train() already saved it)
+                    next_step = self.__get_step(model)
+                    checkpoint_dir = get_step_checkpoint_dir(
+                        get_model_dir(model=model, art_path=self._path), next_step
+                    )
+
+                    # Swap LoRA (Phase 2.2 uses swap, Step 2.4 will use NCCL)
+                    logger.info(f"[TRAINING]   Swapping LoRA checkpoint...")
+                    await service.swap_lora_checkpoint(
+                        checkpoint_dir, base_url=base_url
+                    )
+
+                    service._training_step += 1
+                    trajectory_queue.task_done()
+
+                    lag = service._training_step - service._generation_step
+                    logger.info(
+                        f"[TRAINING] Completed training step {service._training_step - 1}"
+                    )
+                    logger.info(
+                        f"[TRAINING]   Step delta: {lag} (training - generation)"
+                    )
+
+                logger.info("[TRAINING] All training complete")
+                # Signal end to metrics yielder
+                await metrics_queue.put(None)
+
+            except Exception as e:
+                logger.error(f"[TRAINING] Error in training task: {e}")
+                import traceback
+
+                traceback.print_exc()
+                raise
+
+        # Start both tasks concurrently
+        logger.info("[CONCURRENT] Launching generation and training tasks")
+        gen_task = asyncio.create_task(generation_task())
+        train_task = asyncio.create_task(training_task())
+
+        try:
+            # Yield metrics as they become available
+            while True:
+                metrics = await metrics_queue.get()
+                if metrics is None:
+                    break
+                yield metrics
+
+            # Wait for both tasks to complete
+            logger.info("[CONCURRENT] Waiting for tasks to complete...")
+            await asyncio.gather(gen_task, train_task)
+            logger.info("[CONCURRENT] Both tasks completed successfully")
+
+        except Exception as e:
+            logger.error(f"[CONCURRENT] Error in concurrent pipeline: {e}")
+            # Cancel both tasks on error
+            gen_task.cancel()
+            train_task.cancel()
+            try:
+                await asyncio.gather(gen_task, train_task, return_exceptions=True)
+            except:
+                pass
+            raise
 
     def _get_reward_std_dev_learning_rate_multiplier(
         self, model: TrainableModel
