@@ -692,6 +692,124 @@ class LocalBackend(Backend):
         if verbose:
             print("_train_model complete")
 
+    async def _generate_batch(
+        self,
+        model: TrainableModel,
+        prompts: list[list[dict]],
+        reward_fn: callable,
+        base_url: str = "http://localhost:8000",
+        generation_config: dict | None = None,
+    ) -> list[TrajectoryGroup]:
+        """
+        Generate trajectories by calling vLLM via OpenAI-compatible API.
+
+        This function is reusable across both sequential and concurrent implementations.
+        It takes prompts, generates completions via vLLM, and constructs TrajectoryGroups
+        with rewards computed by the provided reward function.
+
+        Args:
+            model: The TrainableModel being trained
+            prompts: List of conversation prompts (each prompt is a list of message dicts)
+            reward_fn: Function that takes (prompt, response) and returns a reward (float)
+            base_url: Base URL for vLLM server (default: http://localhost:8000)
+            generation_config: Optional generation config (max_tokens, temperature, etc.)
+
+        Returns:
+            List of TrajectoryGroup objects, one per prompt
+
+        Example:
+            ```python
+            def compute_reward(prompt, response):
+                # Task-specific reward logic
+                if "maybe" in response.lower():
+                    return 1.0
+                elif "no" in response.lower():
+                    return 0.75
+                else:
+                    return 0.5
+
+            prompts = [
+                [{"role": "user", "content": "Respond with yes, no, or maybe"}],
+                [{"role": "user", "content": "Say something"}],
+            ]
+
+            trajectory_groups = await backend._generate_batch(
+                model=model,
+                prompts=prompts,
+                reward_fn=compute_reward,
+                base_url="http://localhost:8000",
+            )
+            ```
+        """
+        from ..trajectories import Trajectory, TrajectoryGroup
+
+        logger.info(f"[GENERATE_BATCH] Generating {len(prompts)} trajectories")
+        logger.info(f"[GENERATE_BATCH]   Base URL: {base_url}")
+
+        # Set default generation config
+        if generation_config is None:
+            generation_config = {
+                "max_tokens": 512,
+                "temperature": 0.7,
+            }
+
+        logger.info(f"[GENERATE_BATCH]   Generation config: {generation_config}")
+
+        # Create OpenAI client
+        client = AsyncOpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
+
+        # Call vLLM for all prompts in parallel
+        logger.info(f"[GENERATE_BATCH] Calling vLLM for {len(prompts)} prompts...")
+
+        try:
+            responses = await asyncio.gather(
+                *[
+                    client.chat.completions.create(
+                        model=model.base_model,  # vLLM uses base model name
+                        messages=prompt,
+                        **generation_config,
+                    )
+                    for prompt in prompts
+                ]
+            )
+            logger.info(f"[GENERATE_BATCH] Received {len(responses)} responses from vLLM")
+        except Exception as e:
+            logger.error(f"[GENERATE_BATCH] Error calling vLLM: {e}")
+            raise
+
+        # Convert responses to TrajectoryGroups
+        trajectory_groups = []
+        for i, (prompt, response) in enumerate(zip(prompts, responses)):
+            # Extract response content
+            response_content = response.choices[0].message.content or ""
+
+            # Compute reward using provided function
+            reward = reward_fn(prompt, response_content)
+
+            # Create trajectory
+            # messages_and_choices format: [user_msg1, assistant_msg1, user_msg2, assistant_msg2, ...]
+            messages_and_choices = list(prompt) + [
+                {"role": "assistant", "content": response_content}
+            ]
+
+            trajectory = Trajectory(
+                messages_and_choices=messages_and_choices,
+                reward=reward,
+                metadata={
+                    "prompt_idx": i,
+                    "response_tokens": response.usage.completion_tokens if response.usage else 0,
+                },
+            )
+
+            # Wrap in TrajectoryGroup (single trajectory per group for now)
+            trajectory_group = TrajectoryGroup([trajectory])
+            trajectory_groups.append(trajectory_group)
+
+        logger.info(
+            f"[GENERATE_BATCH] Created {len(trajectory_groups)} trajectory groups"
+        )
+        return trajectory_groups
+
     async def _pipeline_rl_train(
         self,
         model: TrainableModel,
