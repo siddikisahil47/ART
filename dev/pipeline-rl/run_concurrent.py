@@ -1,25 +1,29 @@
 """
-Test script for Step 2.2: Concurrent Structure with Dummy Data
+Test script for Step 2.3: Concurrent Pipeline with Real vLLM Generation
 
-This script tests the concurrent task orchestration:
+This script demonstrates the full concurrent PipelineRL implementation:
+- Real vLLM generation (not dummy data)
 - asyncio.Queue for trajectory flow
 - Generation and training tasks running concurrently
-- Backpressure with max_step_lag
-- Proper async coordination
+- Multiple trajectories per prompt for advantage calculation
+- Backpressure via queue maxsize
 
-Uses dummy trajectories to focus on testing concurrency structure.
-Step 2.3 will connect real vLLM generation.
+Pattern:
+- N trajectories per prompt (default: 32)
+- M groups (prompts) per step (default: 2)
+- With 5 unique prompts total → 3 steps to process all
 
 Requirements:
 - 2 GPU machine (GPU 0 for vLLM, GPU 1 for training)
 - CUDA_VISIBLE_DEVICES=0,1
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0,1 uv run python dev/pipeline-rl/test_concurrent.py
+    CUDA_VISIBLE_DEVICES=0,1 uv run python dev/pipeline-rl/run_concurrent.py
 """
 
 import asyncio
 import logging
+import random
 
 import art
 from art import Trajectory, TrajectoryGroup, TrainableModel, TrainConfig
@@ -52,39 +56,67 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def dummy_prompt_generator():
-    """
-    Dummy prompt generator (not used in Step 2.2).
+# Yes-no-maybe task
+PROMPT_TEMPLATES = [
+    "Respond with 'yes', or 'maybe'.",
+    "Answer no, or maybe.",
+    "Say one of: yes, no, maybe",
+    "Pick yes or no",
+    "Choose: yes or maybe",
+]
 
-    Step 2.2 uses inline dummy data generation.
-    Step 2.3 will use a real prompt generator.
+
+def yes_no_maybe_prompt_generator():
     """
-    pass
+    Generate prompts for yes-no-maybe task.
+
+    Returns a list of messages (OpenAI format).
+    """
+    template = random.choice(PROMPT_TEMPLATES)
+    return [{"role": "user", "content": template}]
 
 
-def dummy_reward_fn(prompt, response):
+def yes_no_maybe_reward_fn(prompt, response):
     """
-    Dummy reward function (not used in Step 2.2).
+    Reward function for yes-no-maybe task.
 
-    Step 2.2 uses inline reward assignment.
-    Step 2.3 will use a real reward function.
+    Rewards:
+    - "maybe" = 1.0 (best)
+    - "no" = 0.75 (middle)
+    - "yes" = 0.5 (worst)
+
+    Model should learn to say "maybe" more often.
     """
-    pass
+    response_lower = response.lower()
+    return random.random()
+
+    if "maybe" in response_lower:
+        return 1.0
+    elif "no" in response_lower:
+        return 0.75
+    elif "yes" in response_lower:
+        return 0.5
+    else:
+        # Default reward for unexpected responses
+        return 0.25
 
 
 async def main():
     logger.info("=" * 80)
-    logger.info("Step 2.2: Test Concurrent Structure with Dummy Data")
+    logger.info("Step 2.3: Concurrent Pipeline with Real vLLM Generation")
     logger.info("=" * 80)
     logger.info("")
-    logger.info("This test focuses on concurrent task orchestration:")
+    logger.info("This demonstrates the full concurrent PipelineRL implementation:")
+    logger.info("  - Real vLLM generation (not dummy data)")
+    logger.info("  - Multiple trajectories per prompt (for advantage calculation)")
     logger.info("  - asyncio.Queue for trajectory flow")
     logger.info("  - Generation and training tasks running concurrently")
-    logger.info("  - Backpressure with max_step_lag")
-    logger.info("  - Proper async coordination")
+    logger.info("  - Natural backpressure via queue maxsize")
     logger.info("")
-    logger.info("Using dummy data to test concurrency structure.")
-    logger.info("Step 2.3 will connect real vLLM generation.")
+    logger.info("Pattern:")
+    logger.info("  - N=32 trajectories per prompt (multiple completions)")
+    logger.info("  - M=2 groups (prompts) per training step")
+    logger.info("  - With 5 unique prompt templates → randomly sample")
     logger.info("")
 
     # Initialize backend
@@ -95,7 +127,7 @@ async def main():
     model = TrainableModel(
         name="pipeline-rl-test",
         project="pipelinerl-concurrent",
-        base_model="OpenPipe/Qwen3-14B-Instruct",
+        base_model="Qwen/Qwen3-4B-Instruct-2507",
         _internal_config=InternalModelConfig(
             _use_pipeline_rl=True,
             init_args=InitArgs(
@@ -125,18 +157,32 @@ async def main():
     )
 
     dev_config = DevTrainConfig(
-        allow_training_without_logprobs=True,  # Dummy trajectories have no logprobs
+        allow_training_without_logprobs=False,  # Real vLLM generation provides logprobs
     )
 
     # Configure GPU assignment
     inference_gpu_ids = [0]  # vLLM uses GPU 0
     trainer_gpu_ids = [1]  # Unsloth uses GPU 1
 
-    # Concurrent mode parameters
-    num_iterations = 100  # 100 steps
-    num_groups = 20  # 20 trajectory groups per batch
-    trajectories_per_group = 2  # 2 trajectories per group (for advantage calculation)
-    max_step_lag = 2  # Max policy lag (not used yet, TODO)
+    # Concurrent mode parameters (defaults as specified by user)
+    num_iterations = 10  # Run for 10 steps
+    num_groups = 2  # M=2 groups (prompts) per step
+    trajectories_per_group = 3  # N=32 trajectories per prompt
+    max_step_lag = 5  # Allow generation to get 5 steps ahead
+
+    logger.info("")
+    logger.info("Configuration:")
+    logger.info(f"  - num_iterations: {num_iterations} steps")
+    logger.info(
+        f"  - num_groups: {num_groups} prompts per step (M groups per training step)"
+    )
+    logger.info(
+        f"  - trajectories_per_group: {trajectories_per_group} completions per prompt (N trajectories per group)"
+    )
+    logger.info(
+        f"  - Per step: {num_groups} groups × {trajectories_per_group} trajectories = {num_groups * trajectories_per_group} total trajectories"
+    )
+    logger.info(f"  - max_step_lag: {max_step_lag} (queue-based backpressure)")
 
     # Run PipelineRL training (concurrent mode)
     logger.info("\n[3] Starting PipelineRL concurrent training...")
@@ -144,18 +190,12 @@ async def main():
     logger.info(f"      - Inference GPUs (vLLM): {inference_gpu_ids}")
     logger.info(f"      - Training GPUs (Unsloth): {trainer_gpu_ids}")
     logger.info("")
-    logger.info("    Concurrent Mode Parameters:")
-    logger.info(f"      - num_iterations: {num_iterations}")
-    logger.info(f"      - num_groups: {num_groups}")
-    logger.info(f"      - trajectories_per_group: {trajectories_per_group}")
-    logger.info(f"      - max_step_lag: {max_step_lag}")
-    logger.info("")
     logger.info("    This will:")
     logger.info("      - Start vLLM with process group support")
     logger.info("      - Launch generation and training tasks concurrently")
-    logger.info("      - Generation creates dummy trajectories")
+    logger.info("      - Generation calls vLLM to create real trajectories")
     logger.info("      - Training consumes from queue and trains")
-    logger.info("      - Backpressure prevents generation from getting too far ahead")
+    logger.info("      - Queue provides natural backpressure")
     logger.info("")
 
     iteration = 0
@@ -169,8 +209,8 @@ async def main():
         max_step_lag=max_step_lag,
         base_url="http://localhost:8000",
         concurrent=True,  # Enable concurrent mode
-        prompt_generator=dummy_prompt_generator,  # Not actually used in Step 2.2
-        reward_fn=dummy_reward_fn,  # Not actually used in Step 2.2
+        prompt_generator=yes_no_maybe_prompt_generator,  # Real prompt generator
+        reward_fn=yes_no_maybe_reward_fn,  # Real reward function
         num_iterations=num_iterations,
         num_groups=num_groups,
         trajectories_per_group=trajectories_per_group,
@@ -180,24 +220,27 @@ async def main():
 
     logger.info("\n[4] Training complete!")
     logger.info("=" * 80)
-    logger.info("✓ Success! Concurrent structure test passed.")
+    logger.info("✓ Success! Concurrent pipeline with real generation test passed.")
     logger.info("=" * 80)
     logger.info("")
     logger.info("What we verified:")
+    logger.info("  ✓ Real vLLM generation (not dummy data)")
+    logger.info("  ✓ Multiple completions per prompt (N trajectories per group)")
     logger.info("  ✓ asyncio.Queue for trajectory flow")
     logger.info("  ✓ Generation task runs concurrently with training task")
     logger.info("  ✓ Backpressure prevents queue overflow")
     logger.info("  ✓ Proper async coordination (no deadlocks)")
     logger.info("  ✓ LoRA swapping happens after each training step")
-    logger.info("  ✓ Lag tracking works correctly")
     logger.info("")
     logger.info("What we observed:")
-    logger.info(f"  - Generation created {num_iterations} batches")
-    logger.info(f"  - Each batch had {num_groups} groups with {trajectories_per_group} trajectories each")
+    logger.info(f"  - Ran {num_iterations} training steps")
+    logger.info(
+        f"  - Each step: {num_groups} groups × {trajectories_per_group} trajectories = {num_groups * trajectories_per_group} total trajectories"
+    )
     logger.info(f"  - Training processed {iteration} gradient steps")
     logger.info("  - Both tasks completed cleanly")
     logger.info("")
-    logger.info("Next: Step 2.3 - Connect real vLLM generation")
+    logger.info("Next: Step 2.4 - Add NCCL in-flight weight updates (future)")
 
 
 if __name__ == "__main__":

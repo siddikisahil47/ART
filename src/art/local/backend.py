@@ -345,6 +345,8 @@ class LocalBackend(Backend):
             )
         )
         if not tokenized_results:
+            logger.warning("No tokenized_results")
+            logger.warning(f"example group: {trajectory_groups[0]}")
             return None
         max_tokens = max(len(result.tokens) for result in tokenized_results)
         # Round up max_tokens to the nearest multiple of 2048
@@ -366,16 +368,17 @@ class LocalBackend(Backend):
             not allow_training_without_logprobs
             and np.isnan(packed_tensors["logprobs"]).all()
         ):
-            print(
+            logger.warning(
                 "There are no assistant logprobs to train on. Did you forget to include at least one Choice in Trajectory.messages_and_choices?"
             )
+            logger.warning(f"example group: {trajectory_groups[0]}")
             return None
         if plot_tensors:
             plot_packed_tensors(
                 packed_tensors, get_model_dir(model=model, art_path=self._path)
             )
         else:
-            print(
+            logger.info(
                 f"Packed {len(tokenized_results)} trajectories into {packed_tensors['tokens'].shape[0]} sequences of length {packed_tensors['tokens'].shape[1]}"
             )
         return packed_tensors
@@ -699,13 +702,14 @@ class LocalBackend(Backend):
         reward_fn: Callable,
         base_url: str = "http://localhost:8000",
         generation_config: dict | None = None,
+        trajectories_per_prompt: int = 32,
     ) -> list[TrajectoryGroup]:
         """
         Generate trajectories by calling vLLM via OpenAI-compatible API.
 
         This function is reusable across both sequential and concurrent implementations.
-        It takes prompts, generates completions via vLLM, and constructs TrajectoryGroups
-        with rewards computed by the provided reward function.
+        For each prompt, it generates N trajectories (multiple completions) which are
+        grouped together for advantage calculation in RL training.
 
         Args:
             model: The TrainableModel being trained
@@ -713,9 +717,10 @@ class LocalBackend(Backend):
             reward_fn: Function that takes (prompt, response) and returns a reward (float)
             base_url: Base URL for vLLM server (default: http://localhost:8000)
             generation_config: Optional generation config (max_tokens, temperature, etc.)
+            trajectories_per_prompt: Number of completions to generate per prompt (default: 32)
 
         Returns:
-            List of TrajectoryGroup objects, one per prompt
+            List of TrajectoryGroup objects, one per prompt, each containing N trajectories
 
         Example:
             ```python
@@ -733,17 +738,22 @@ class LocalBackend(Backend):
                 [{"role": "user", "content": "Say something"}],
             ]
 
+            # Generate 32 trajectories for each prompt
             trajectory_groups = await backend._generate_batch(
                 model=model,
                 prompts=prompts,
                 reward_fn=compute_reward,
                 base_url="http://localhost:8000",
+                trajectories_per_prompt=32,
             )
+            # Result: 2 TrajectoryGroups, each with 32 trajectories
             ```
         """
         from ..trajectories import Trajectory, TrajectoryGroup
 
-        logger.info(f"[GENERATE_BATCH] Generating {len(prompts)} trajectories")
+        logger.info(
+            f"[GENERATE_BATCH] Generating {len(prompts)} groups × {trajectories_per_prompt} trajectories = {len(prompts) * trajectories_per_prompt} total"
+        )
         logger.info(f"[GENERATE_BATCH]   Base URL: {base_url}")
 
         # Set default generation config
@@ -758,28 +768,41 @@ class LocalBackend(Backend):
         # Create OpenAI client
         client = AsyncOpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
 
-        # Call vLLM for all prompts in parallel
-        logger.info(f"[GENERATE_BATCH] Calling vLLM for {len(prompts)} prompts...")
+        # Build list of all vLLM calls: each prompt repeated N times
+        # This allows us to generate N different completions for each prompt
+        logger.info(
+            f"[GENERATE_BATCH] Calling vLLM for {len(prompts)} prompts × {trajectories_per_prompt} = {len(prompts) * trajectories_per_prompt} completions..."
+        )
+
+        # Create all completion tasks (one per trajectory)
+        completion_tasks = []
+        for prompt_idx, prompt in enumerate(prompts):
+            for traj_idx in range(trajectories_per_prompt):
+                task = client.chat.completions.create(
+                    model=model.base_model,  # vLLM uses base model name
+                    messages=prompt,
+                    **generation_config,
+                )
+                completion_tasks.append((prompt_idx, traj_idx, prompt, task))
 
         try:
-            responses = await asyncio.gather(
-                *[
-                    client.chat.completions.create(
-                        model=model.base_model,  # vLLM uses base model name
-                        messages=prompt,
-                        **generation_config,
-                    )
-                    for prompt in prompts
-                ]
+            # Execute all completions in parallel
+            results = await asyncio.gather(
+                *[task for (_, _, _, task) in completion_tasks]
             )
-            logger.info(f"[GENERATE_BATCH] Received {len(responses)} responses from vLLM")
+            logger.info(f"[GENERATE_BATCH] Received {len(results)} responses from vLLM")
         except Exception as e:
             logger.error(f"[GENERATE_BATCH] Error calling vLLM: {e}")
             raise
 
-        # Convert responses to TrajectoryGroups
-        trajectory_groups = []
-        for i, (prompt, response) in enumerate(zip(prompts, responses)):
+        # Group trajectories by prompt_idx
+        trajectories_by_prompt: dict[int, list[Trajectory]] = {
+            i: [] for i in range(len(prompts))
+        }
+
+        for (prompt_idx, traj_idx, prompt, _), response in zip(
+            completion_tasks, results
+        ):
             # Extract response content
             response_content = response.choices[0].message.content or ""
 
@@ -796,17 +819,28 @@ class LocalBackend(Backend):
                 messages_and_choices=messages_and_choices,
                 reward=reward,
                 metadata={
-                    "prompt_idx": i,
-                    "response_tokens": response.usage.completion_tokens if response.usage else 0,
+                    "prompt_idx": prompt_idx,
+                    "traj_idx": traj_idx,
+                    "response_tokens": (
+                        response.usage.completion_tokens if response.usage else 0
+                    ),
                 },
             )
 
-            # Wrap in TrajectoryGroup (single trajectory per group for now)
-            trajectory_group = TrajectoryGroup([trajectory])
+            trajectories_by_prompt[prompt_idx].append(trajectory)
+
+        # Create TrajectoryGroups (one per prompt, each with N trajectories)
+        trajectory_groups = []
+        for prompt_idx in range(len(prompts)):
+            trajectories = trajectories_by_prompt[prompt_idx]
+            trajectory_group = TrajectoryGroup(trajectories)
             trajectory_groups.append(trajectory_group)
 
         logger.info(
             f"[GENERATE_BATCH] Created {len(trajectory_groups)} trajectory groups"
+        )
+        logger.info(
+            f"[GENERATE_BATCH]   Each group contains {trajectories_per_prompt} trajectories"
         )
         return trajectory_groups
 
@@ -1133,47 +1167,28 @@ class LocalBackend(Backend):
                         f"[GENERATION] Starting generation step {service._generation_step}"
                     )
 
-                    # Generate dummy trajectories for Step 2.2
-                    # TODO: Replace with real generation in Step 2.3
+                    # Generate prompts for this step
+                    logger.info(f"[GENERATION]   Generating {num_groups} prompts...")
+                    prompts = []
+                    for _ in range(num_groups):
+                        prompt = prompt_generator()
+                        prompts.append(prompt)
+                    logger.info(f"[GENERATION]   Generated {len(prompts)} prompts")
+
+                    # Call vLLM to generate trajectories
+                    # For each prompt: generate trajectories_per_group completions
                     logger.info(
-                        f"[GENERATION]   Creating {num_groups} trajectory groups with {trajectories_per_group} trajectories each..."
+                        f"[GENERATION]   Calling vLLM to generate {num_groups} groups × {trajectories_per_group} trajectories..."
                     )
-                    trajectory_groups = []
-
-                    for group_idx in range(num_groups):
-                        # Create multiple trajectories per group with varying rewards
-                        trajectories = []
-                        for traj_idx in range(trajectories_per_group):
-                            # Different rewards for ranking/advantage calculation
-                            rewards = [0.5, 0.75, 1.0]  # Vary rewards
-                            reward = rewards[traj_idx % len(rewards)]
-
-                            trajectory = Trajectory(
-                                messages_and_choices=[
-                                    {
-                                        "role": "user",
-                                        "content": f"Dummy prompt {iteration}-{group_idx}",
-                                    },
-                                    {
-                                        "role": "assistant",
-                                        "content": f"Dummy response {iteration}-{group_idx}-{traj_idx}",
-                                    },
-                                ],
-                                reward=reward,
-                                metadata={
-                                    "iteration": iteration,
-                                    "group_idx": group_idx,
-                                    "traj_idx": traj_idx,
-                                    "generation_step": service._generation_step,
-                                },
-                            )
-                            trajectories.append(trajectory)
-
-                        trajectory_group = TrajectoryGroup(trajectories)
-                        trajectory_groups.append(trajectory_group)
-
+                    trajectory_groups = await self._generate_batch(
+                        model=model,
+                        prompts=prompts,
+                        reward_fn=reward_fn,
+                        base_url=base_url,
+                        trajectories_per_prompt=trajectories_per_group,
+                    )
                     logger.info(
-                        f"[GENERATION]   Created {len(trajectory_groups)} dummy trajectory groups"
+                        f"[GENERATION]   Received {len(trajectory_groups)} trajectory groups from vLLM"
                     )
 
                     # Put in queue (will block if queue is full - natural backpressure)

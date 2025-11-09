@@ -160,8 +160,11 @@ async def main():
 
     # Test trajectory generation
     logger.info("[4] Testing _generate_batch() with sample prompts...")
+    logger.info(
+        "    Testing new pattern: N trajectories per prompt (multiple completions)"
+    )
 
-    # Create test prompts (yes-no-maybe task)
+    # Create test prompts (fewer prompts, but we'll generate multiple completions per prompt)
     test_prompts = [
         [{"role": "user", "content": "Respond with 'yes', or 'maybe'."}],
         [{"role": "user", "content": "Answer no, or maybe."}],
@@ -170,7 +173,15 @@ async def main():
         [{"role": "user", "content": "Choose: yes or maybe"}],
     ]
 
-    logger.info(f"    Generating {len(test_prompts)} trajectories...")
+    trajectories_per_prompt = 3  # Small number for testing (real usage: 32)
+
+    logger.info(f"    Generating {len(test_prompts)} prompts...")
+    logger.info(
+        f"    Each prompt will have {trajectories_per_prompt} completions (trajectories)"
+    )
+    logger.info(
+        f"    Total: {len(test_prompts) * trajectories_per_prompt} trajectories"
+    )
 
     # Call _generate_batch
     trajectory_groups = await backend._generate_batch(
@@ -180,8 +191,9 @@ async def main():
         base_url=base_url,
         generation_config={
             "max_tokens": 50,  # Short responses for testing
-            "temperature": 0.9,  # Higher temp for variety
+            "temperature": 0.9,  # Higher temp for variety between completions
         },
+        trajectories_per_prompt=trajectories_per_prompt,
     )
 
     logger.info(f"    ✓ Generated {len(trajectory_groups)} trajectory groups\n")
@@ -190,27 +202,43 @@ async def main():
     logger.info("[5] Verifying generated trajectories...")
 
     for i, group in enumerate(trajectory_groups):
-        assert len(group.trajectories) == 1, f"Expected 1 trajectory per group, got {len(group.trajectories)}"
-        trajectory = group.trajectories[0]
+        logger.info(f"\n    TrajectoryGroup {i}:")
+        logger.info(
+            f"      Expected {trajectories_per_prompt} trajectories, got {len(group.trajectories)}"
+        )
+        assert len(group.trajectories) == trajectories_per_prompt, (
+            f"Expected {trajectories_per_prompt} trajectories per group, got {len(group.trajectories)}"
+        )
 
-        # Check messages
-        messages = trajectory.messages()
-        assert len(messages) >= 2, f"Expected at least 2 messages (user + assistant), got {len(messages)}"
-        assert messages[0]["role"] == "user", f"Expected first message to be user, got {messages[0]['role']}"
-        assert messages[-1]["role"] == "assistant", f"Expected last message to be assistant, got {messages[-1]['role']}"
+        # Check each trajectory in the group
+        for j, trajectory in enumerate(group.trajectories):
+            # Check messages
+            messages = trajectory.messages()
+            assert len(messages) >= 2, (
+                f"Expected at least 2 messages (user + assistant), got {len(messages)}"
+            )
+            assert messages[0]["role"] == "user", (
+                f"Expected first message to be user, got {messages[0]['role']}"
+            )
+            assert messages[-1]["role"] == "assistant", (
+                f"Expected last message to be assistant, got {messages[-1]['role']}"
+            )
 
-        # Check reward
-        assert 0.0 <= trajectory.reward <= 1.0, f"Reward should be between 0 and 1, got {trajectory.reward}"
+            # Check reward
+            assert 0.0 <= trajectory.reward <= 1.0, (
+                f"Reward should be between 0 and 1, got {trajectory.reward}"
+            )
 
-        # Check metadata
-        assert "prompt_idx" in trajectory.metadata, "Missing prompt_idx in metadata"
+            # Check metadata
+            assert "prompt_idx" in trajectory.metadata, "Missing prompt_idx in metadata"
+            assert "traj_idx" in trajectory.metadata, "Missing traj_idx in metadata"
 
-        # Log results
-        response_content = messages[-1]["content"]
-        logger.info(f"    Trajectory {i}:")
-        logger.info(f"      Prompt: {messages[0]['content'][:50]}...")
-        logger.info(f"      Response: {response_content}")
-        logger.info(f"      Reward: {trajectory.reward}")
+            # Log results
+            response_content = messages[-1]["content"]
+            logger.info(f"        Trajectory {j}:")
+            logger.info(f"          Prompt: {messages[0]['content'][:50]}...")
+            logger.info(f"          Response: {response_content}")
+            logger.info(f"          Reward: {trajectory.reward}")
 
     logger.info("\n" + "=" * 80)
     logger.info("✓ Success! Trajectory generation test passed.")
@@ -218,12 +246,23 @@ async def main():
     logger.info("")
     logger.info("What we verified:")
     logger.info("  ✓ vLLM server responds to OpenAI API calls")
+    logger.info(
+        "  ✓ Multiple completions generated per prompt (N trajectories per group)"
+    )
     logger.info("  ✓ Responses are converted to Trajectory objects")
     logger.info("  ✓ Rewards are computed correctly")
-    logger.info("  ✓ TrajectoryGroups have proper structure")
+    logger.info(
+        f"  ✓ Each TrajectoryGroup contains {trajectories_per_prompt} trajectories"
+    )
     logger.info("  ✓ Function is ready for use in concurrent pipeline")
     logger.info("")
-    logger.info("Next: Step 2.2 - Build concurrent structure with dummy data")
+    logger.info("Pattern:")
+    logger.info(
+        f"  - {len(test_prompts)} prompts × {trajectories_per_prompt} completions = {len(test_prompts) * trajectories_per_prompt} trajectories"
+    )
+    logger.info(f"  - Result: {len(trajectory_groups)} TrajectoryGroups")
+    logger.info("")
+    logger.info("Next: Step 2.3 - Use this in concurrent pipeline")
 
 
 if __name__ == "__main__":
