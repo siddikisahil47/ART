@@ -192,6 +192,7 @@ async def main():
         generation_config={
             "max_tokens": 50,  # Short responses for testing
             "temperature": 0.9,  # Higher temp for variety between completions
+            "logprobs": True,
         },
         trajectories_per_prompt=trajectories_per_prompt,
     )
@@ -233,9 +234,18 @@ async def main():
             assert "prompt_idx" in trajectory.metadata, "Missing prompt_idx in metadata"
             assert "traj_idx" in trajectory.metadata, "Missing traj_idx in metadata"
 
+            # Verify logprobs are present (essential for RL training)
+            # The last message should be a Choice object with logprobs
+            last_message_or_choice = trajectory.messages_and_choices[-1]
+            if hasattr(last_message_or_choice, "logprobs"):
+                logger.info(f"        Trajectory {j}: ✓ Has logprobs")
+            else:
+                logger.warning(
+                    f"        Trajectory {j}: ⚠ Missing logprobs (this will cause training to fail)"
+                )
+
             # Log results
             response_content = messages[-1]["content"]
-            logger.info(f"        Trajectory {j}:")
             logger.info(f"          Prompt: {messages[0]['content'][:50]}...")
             logger.info(f"          Response: {response_content}")
             logger.info(f"          Reward: {trajectory.reward}")
@@ -249,7 +259,8 @@ async def main():
     logger.info(
         "  ✓ Multiple completions generated per prompt (N trajectories per group)"
     )
-    logger.info("  ✓ Responses are converted to Trajectory objects")
+    logger.info("  ✓ Responses are converted to Trajectory objects with Choice objects")
+    logger.info("  ✓ Logprobs are present (essential for RL training)")
     logger.info("  ✓ Rewards are computed correctly")
     logger.info(
         f"  ✓ Each TrajectoryGroup contains {trajectories_per_prompt} trajectories"

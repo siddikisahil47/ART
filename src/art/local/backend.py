@@ -761,7 +761,12 @@ class LocalBackend(Backend):
             generation_config = {
                 "max_tokens": 512,
                 "temperature": 0.7,
+                "logprobs": True,
             }
+        else:
+            # Ensure logprobs is set (override if not specified)
+            if "logprobs" not in generation_config:
+                generation_config["logprobs"] = True
 
         logger.info(f"[GENERATE_BATCH]   Generation config: {generation_config}")
 
@@ -803,17 +808,18 @@ class LocalBackend(Backend):
         for (prompt_idx, traj_idx, prompt, _), response in zip(
             completion_tasks, results
         ):
-            # Extract response content
-            response_content = response.choices[0].message.content or ""
+            # Get the Choice object (contains logprobs and other metadata)
+            choice = response.choices[0]
+
+            # Extract response content for reward computation
+            response_content = choice.message.content or ""
 
             # Compute reward using provided function
             reward = reward_fn(prompt, response_content)
 
             # Create trajectory
-            # messages_and_choices format: [user_msg1, assistant_msg1, user_msg2, assistant_msg2, ...]
-            messages_and_choices = list(prompt) + [
-                {"role": "assistant", "content": response_content}
-            ]
+            # messages_and_choices format: [user_msg1, choice1, user_msg2, choice2, ...]
+            messages_and_choices = list(prompt) + [choice]
 
             trajectory = Trajectory(
                 messages_and_choices=messages_and_choices,
