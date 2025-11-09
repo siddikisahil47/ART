@@ -282,12 +282,19 @@ class PipelineRLService:
             model_path = self.base_model
 
         # Build command to launch vllm_server.py
+        # We use --served-model-name so vLLM serves the model under the TrainableModel's name
+        # This allows rollout() to call the API with model.get_inference_name() (e.g., "agent-001")
+        logger.info(
+            f"[PIPELINE_RL_SERVICE]   vLLM will serve model '{model_path}' as '{self.model_name}'"
+        )
         cmd = [
             "uv",
             "run",
             vllm_server_script,
             "--model",
             model_path,
+            "--served-model-name",
+            self.model_name,  # Serve under the TrainableModel's name (e.g., "agent-001")
             "--host",
             host,
             "--port",
