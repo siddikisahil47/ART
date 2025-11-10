@@ -60,6 +60,9 @@ if not root_logger.handlers:
 logging.getLogger("art.local.backend").setLevel(logging.INFO)
 logging.getLogger("art.local.pipeline_rl_service").setLevel(logging.INFO)
 
+# Disable httpx logging (too verbose with vLLM API calls)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -355,6 +358,7 @@ async def pipeline_rl_train_2048(
     # Get service
     try:
         service = await backend._get_service(model)
+        logger.info(f"Service: {service._obj}")
     finally:
         if original_cuda_visible is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
