@@ -212,10 +212,6 @@ class PipelineRLService:
         logger.info("[PIPELINE_RL_SERVICE] Starting vLLM server (standard mode)")
         # TODO: Implement standard vLLM startup
         # For now, raise NotImplementedError
-        raise NotImplementedError(
-            "start_openai_server not yet implemented for PipelineRLService. "
-            "Use start_openai_server_with_weight_updates() for PipelineRL mode."
-        )
 
     async def start_openai_server_with_weight_updates(
         self,
