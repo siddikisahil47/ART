@@ -275,7 +275,7 @@ class LocalBackend(Backend):
 
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key="EMPTY", base_url=f"{base_url}/v1")
+        client = AsyncOpenAI(api_key="EMPTY", base_url=base_url)
         start_time = time.time()
 
         while True:
@@ -431,21 +431,87 @@ class LocalBackend(Backend):
         model: TrainableModel,
         config: dev.OpenAIServerConfig | None = None,
     ) -> tuple[str, str]:
-        service = await self._get_service(model)
-        await service.start_openai_server(config=config)
-        server_args = (config or {}).get("server_args", {})
+        from ..dev.get_model_config import get_model_config
 
-        base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
-        api_key = server_args.get("api_key", None) or "default"
+        model_config = get_model_config(
+            base_model=model.base_model,
+            output_dir=get_model_dir(model=model, art_path=self._path),
+            config=model._internal_config,
+        )
 
-        def done_callback(_: asyncio.Task[None]) -> None:
-            close_proxy(self._services.pop(model.name))
+        if model_config.get("_use_pipeline_rl", False):
+            INFERENCE_GPU_IDS = [1]
+            TRAINING_GPU_IDS = [0]
+            init_method, world_size = await self._init_process_group_for_weight_updates(
+                model, len(INFERENCE_GPU_IDS)
+            )
+            original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
 
-        asyncio.create_task(
-            self._monitor_openai_server(model.name, base_url, api_key)
-        ).add_done_callback(done_callback)
+            # Set CUDA_VISIBLE_DEVICES to only show trainer GPUs
+            # This will be inherited by the subprocess created by @mp_actors.move
+            trainer_gpu_str = ",".join(str(gpu_id) for gpu_id in TRAINING_GPU_IDS)
+            os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu_str
+            logger.info(
+                f"[PIPELINE_RL]   Temporarily set CUDA_VISIBLE_DEVICES={trainer_gpu_str}"
+            )
+            logger.info(f"[PIPELINE_RL]   (original was: {original_cuda_visible})")
 
-        return base_url, api_key
+            # Get service
+            try:
+                service = await self._get_service(model)
+                # logger.info(f"Service: {service._obj}")
+            finally:
+                if original_cuda_visible is not None:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+                else:
+                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                logger.info(
+                    f"[PIPELINE_RL]   Restored CUDA_VISIBLE_DEVICES to: {original_cuda_visible}"
+                )
+            logger.info("[2048_PIPELINE] Starting vLLM...")
+            await service.start_openai_server_with_weight_updates(
+                config=config,
+                init_method=init_method,
+                world_size=world_size,
+                actor_idx=0,
+                inference_gpu_ids=INFERENCE_GPU_IDS,
+            )
+            self._actor_update_group = await self._join_process_group_as_trainer(
+                init_method, world_size
+            )
+            server_args = (config or {}).get("server_args", {})
+
+            base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
+            api_key = server_args.get("api_key", None) or "default"
+            await self._wait_for_vllm_ready(base_url)
+            logger.info("[2048_PIPELINE] vLLM is ready!")
+
+            def done_callback(_: asyncio.Task[None]) -> None:
+                logger.info("OpenAI server Monitor done callback is called")
+                close_proxy(self._services.pop(model.name))
+
+            # asyncio.create_task(
+            #     self._monitor_openai_server(model.name, base_url, api_key)
+            # ).add_done_callback(done_callback)
+
+            return base_url, api_key
+        else:
+            service = await self._get_service(model)
+            await service.start_openai_server(config=config)
+            server_args = (config or {}).get("server_args", {})
+
+            base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
+            api_key = server_args.get("api_key", None) or "default"
+
+            def done_callback(_: asyncio.Task[None]) -> None:
+                logger.info("OpenAI server Monitor done callback is called")
+                close_proxy(self._services.pop(model.name))
+
+            asyncio.create_task(
+                self._monitor_openai_server(model.name, base_url, api_key)
+            ).add_done_callback(done_callback)
+
+            return base_url, api_key
 
     async def _monitor_openai_server(
         self, model_name: str, base_url: str, api_key: str

@@ -339,52 +339,58 @@ async def pipeline_rl_train_2048(
     logger.info("[2048_PIPELINE] Starting concurrent training with 2048 game...")
 
     # Start vLLM and initialize process group (same as standard pipeline)
-    from art.local.pipeline_rl_service import PipelineRLService
+    # from art.local.pipeline_rl_service import PipelineRLService
 
     # assert isinstance(service, PipelineRLService), "Model must use PipelineRLService"
 
-    # Initialize process group
-    init_method, world_size = await backend._init_process_group_for_weight_updates(
-        model, len(inference_gpu_ids)
-    )
-
-    original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-
-    # Set CUDA_VISIBLE_DEVICES to only show trainer GPUs
-    # This will be inherited by the subprocess created by @mp_actors.move
-    trainer_gpu_str = ",".join(str(gpu_id) for gpu_id in trainer_gpu_ids)
-    os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu_str
-
-    # Get service
-    try:
-        service = await backend._get_service(model)
-        logger.info(f"Service: {service._obj}")
-    finally:
-        if original_cuda_visible is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
-        else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-
-
-    # Start vLLM
-    logger.info("[2048_PIPELINE] Starting vLLM...")
-    await service.start_openai_server_with_weight_updates(
-        config=dev_config.get("openai_server_config", None),
-        init_method=init_method,
-        world_size=world_size,
-        actor_idx=0,
-        inference_gpu_ids=inference_gpu_ids,
-    )
-
-    # Join process group
-    backend._actor_update_group = await backend._join_process_group_as_trainer(
-        init_method, world_size
-    )
-
-    # Wait for vLLM
-    await backend._wait_for_vllm_ready(base_url)
-    logger.info("[2048_PIPELINE] vLLM is ready!")
-
+    # # Initialize process group
+    # init_method, world_size = await backend._init_process_group_for_weight_updates(
+    #     model, len(inference_gpu_ids)
+    # )
+    #
+    # original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    #
+    # # Set CUDA_VISIBLE_DEVICES to only show trainer GPUs
+    # # This will be inherited by the subprocess created by @mp_actors.move
+    # trainer_gpu_str = ",".join(str(gpu_id) for gpu_id in trainer_gpu_ids)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu_str
+    # logger.info(
+    #     f"[PIPELINE_RL]   Temporarily set CUDA_VISIBLE_DEVICES={trainer_gpu_str}"
+    # )
+    # logger.info(f"[PIPELINE_RL]   (original was: {original_cuda_visible})")
+    #
+    # # Get service
+    # try:
+    #     service = await backend._get_service(model)
+    #     logger.info(f"Service: {service._obj}")
+    # finally:
+    #     if original_cuda_visible is not None:
+    #         os.environ["CUDA_VISIBLE_DEVICES"] = original_cuda_visible
+    #     else:
+    #         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    #     logger.info(
+    #         f"[PIPELINE_RL]   Restored CUDA_VISIBLE_DEVICES to: {original_cuda_visible}"
+    #     )
+    #
+    # # Start vLLM
+    # logger.info("[2048_PIPELINE] Starting vLLM...")
+    # await service.start_openai_server_with_weight_updates(
+    #     config=dev_config.get("openai_server_config", None),
+    #     init_method=init_method,
+    #     world_size=world_size,
+    #     actor_idx=0,
+    #     inference_gpu_ids=inference_gpu_ids,
+    # )
+    #
+    # # Join process group
+    # backend._actor_update_group = await backend._join_process_group_as_trainer(
+    #     init_method, world_size
+    # )
+    #
+    # # Wait for vLLM
+    # await backend._wait_for_vllm_ready(base_url)
+    # logger.info("[2048_PIPELINE] vLLM is ready!")
+    #
     # Create queues
     trajectory_queue = asyncio.Queue(maxsize=50)
     metrics_queue = asyncio.Queue()
@@ -443,37 +449,49 @@ async def pipeline_rl_train_2048(
             )
 
             try:
-                # Pack trajectories (reuse existing ART functionality)
+                # Count submitted groups and trainable groups
+                #                 num_groups_submitted = len(trajectory_groups)
+                #                 num_groups_trainable = sum(
+                #                     1
+                #                     for group in trajectory_groups
+                #                     if group and len(set(trajectory.reward for trajectory in group)) > 1
+                #                 )
+                #                 logger.info(
+                #                     f"[TRAINING] {num_groups_submitted} groups, {num_groups_trainable} groups trainable"
+                #                 )
+                #
+                #                 # Pack trajectories (reuse existing ART functionality)
+                #                 packed_tensors = backend._get_packed_tensors(
+                #                     model,
+                #                     trajectory_groups,
+                #                     advantage_balance=dev_config.get("advantage_balance", 0.0),
+                #                     allow_training_without_logprobs=dev_config.get(
+                #                         "allow_training_without_logprobs", False
+                #                     ),
+                #                     scale_rewards=dev_config.get("scale_rewards", True),
+                #                     plot_tensors=dev_config.get("plot_tensors", False),
+                #                 )
+                #
+                #                 if packed_tensors is None:
+                #                     logger.warning("[TRAINING] No suitable training data, skipping...")
+                #                     trajectory_queue.task_done()
+                #                     continue
+                #
+                #                 disk_packed_tensors = packed_tensors_to_dir(
+                #                     packed_tensors,
+                #                     f"{get_model_dir(model=model, art_path=backend._path)}/tensors",
+                #                 )
+                #
+                #                 # Train
+                #                 logger.info(f"[TRAINING] Training on batch...")
+                # #
+                #                 async for metrics in service.train(
+                #                     disk_packed_tensors, config, dev_config
+                #                 ):
+                #                     logger.info(f"[TRAINING]   Metrics: {metrics}")
+                #                     await metrics_queue.put(metrics)
 
-                packed_tensors = backend._get_packed_tensors(
-                    model,
-                    trajectory_groups,
-                    advantage_balance=dev_config.get("advantage_balance", 0.0),
-                    allow_training_without_logprobs=dev_config.get(
-                        "allow_training_without_logprobs", False
-                    ),
-                    scale_rewards=dev_config.get("scale_rewards", True),
-                    plot_tensors=dev_config.get("plot_tensors", False),
-                )
-
-                if packed_tensors is None:
-                    logger.warning("[TRAINING] No suitable training data, skipping...")
-                    trajectory_queue.task_done()
-                    continue
-
-                disk_packed_tensors = packed_tensors_to_dir(
-                    packed_tensors,
-                    f"{get_model_dir(model=model, art_path=backend._path)}/tensors",
-                )
-
-                # Train
-                logger.info(f"[TRAINING] Training on batch...")
-#
-                async for metrics in service.train(
-                    disk_packed_tensors, config, dev_config
-                ):
-                    logger.info(f"[TRAINING]   Metrics: {metrics}")
-                    await metrics_queue.put(metrics)
+                await model.train(trajectory_groups, config=config, _config=dev_config)
 
                 # Swap LoRA checkpoint
                 checkpoint_dir = get_step_checkpoint_dir(
