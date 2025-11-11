@@ -577,8 +577,8 @@ async def main():
     # )
 
     # Configure GPU assignment
-    inference_gpu_ids = [0]  # vLLM uses GPU 0
-    trainer_gpu_ids = [1]  # Unsloth uses GPU 1
+    trainer_gpu_ids = [0]  # Unsloth uses GPU 0
+    inference_gpu_ids = [1]  # vLLM uses GPU 1
 
     # Pipeline parameters
     num_iterations = 20  # Run for 20 training steps
