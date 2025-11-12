@@ -100,25 +100,11 @@ class PipelineRLService:
         This is similar to DecoupledUnslothService._state but without any
         sleep/wake logic. The model is initialized once and kept in memory.
         """
-        logger.info("[PIPELINE_RL_SERVICE] Initializing Unsloth state...")
-
-        # Import torch and unsloth
-        # Note: CUDA_VISIBLE_DEVICES was already set in the parent process before
-        # this subprocess was created, so we only see the training GPUs here
-        import torch
         import unsloth
 
-        logger.info(
-            f"[PIPELINE_RL_SERVICE] CUDA_VISIBLE_DEVICES in subprocess: {os.environ.get('CUDA_VISIBLE_DEVICES')}"
-        )
-        logger.info(
-            f"[PIPELINE_RL_SERVICE] torch.cuda.device_count() = {torch.cuda.device_count()}"
-        )
-
-        # Get init args
-        init_args = self.config.get("init_args", {})
-
         # Initialize Unsloth model
+        logger.info("[PIPELINE_RL_SERVICE] Initializing Unsloth state...")
+        init_args = self.config.get("init_args", {})
         checkpoint_dir = get_last_checkpoint_dir(self.output_dir)
         if checkpoint_dir:
             logger.info(f"[PIPELINE_RL_SERVICE] Loading from checkpoint: {checkpoint_dir}")
@@ -127,15 +113,6 @@ class PipelineRLService:
             logger.info(f"[PIPELINE_RL_SERVICE] Loading base model: {self.base_model}")
             init_args["model_name"] = self.base_model
 
-        # Since CUDA_VISIBLE_DEVICES masks GPUs, device 0 in this subprocess
-        # maps to the correct physical training GPU (assumes only 1 training GPU for now)
-        init_args["device_map"] = {"": 0}
-        torch.cuda.set_device(0)
-
-        logger.info(f"[PIPELINE_RL_SERVICE] Loading model on device 0 (masked view)")
-        logger.info(
-            f"[PIPELINE_RL_SERVICE]   device_map = {init_args.get('device_map')}"
-        )
         model, tokenizer = cast(
             tuple[CausalLM, PreTrainedTokenizerBase],
             unsloth.FastLanguageModel.from_pretrained(**init_args),
@@ -155,11 +132,6 @@ class PipelineRLService:
 
         # Initialize trainer with dummy dataset
         data = {"prompt": ""}
-
-        # Ensure device is set correctly before creating trainer
-        torch.cuda.set_device(0)
-        logger.info("[PIPELINE_RL_SERVICE] Creating trainer on device 0 (masked view)")
-
         trainer = GRPOTrainer(
             model=peft_model,  # type: ignore
             reward_funcs=[],
