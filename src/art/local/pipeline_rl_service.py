@@ -661,17 +661,15 @@ class PipelineRLService:
 
     async def _init_process_group_for_weight_updates(
         self,
-        model: TrainableModel,
         num_actor_gpus: int,
     ) -> tuple[str, int]:
         """
-        Initialize process group for weight updates (Phase 1: setup infrastructure).
+        Initialize process group for weight updates.
 
         This creates the TCP rendezvous endpoint that will be used by both the trainer
         and vLLM to coordinate weight updates via NCCL.
 
         Args:
-            model: The trainable model
             num_actor_gpus: Number of GPUs dedicated to vLLM generation
 
         Returns:
