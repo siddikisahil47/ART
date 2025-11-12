@@ -21,7 +21,7 @@ from transformers.utils.dummy_pt_objects import GenerationMixin, PreTrainedModel
 from trl import GRPOConfig, GRPOTrainer
 
 # Import torch only for type checking to avoid CUDA initialization
-# The actual import happens in _state after setting CUDA_VISIBLE_DEVICES
+# The actual import happens in state after setting CUDA_VISIBLE_DEVICES
 if TYPE_CHECKING:
     import torch
 
@@ -93,7 +93,7 @@ class PipelineRLService:
     _train_task: asyncio.Task[None] | None = None
 
     @cached_property
-    def _state(self) -> UnslothState:
+    def state(self) -> UnslothState:
         """
         Initialize Unsloth model for training.
 
@@ -362,7 +362,7 @@ class PipelineRLService:
 
         vLLM runs continuously on separate GPUs.
         """
-        # Import torch here (already imported in _state, but needed in this scope)
+        # Import torch here (already imported in state, but needed in this scope)
         import torch
 
         logger.info(
@@ -373,15 +373,15 @@ class PipelineRLService:
         packed_tensors = packed_tensors_from_dir(**disk_packed_tensors)
 
         # Wait for existing batches to finish
-        await self._state.results_queue.join()
+        await self.state.results_queue.join()
 
         # If we haven't already, start the training task
         if self._train_task is None:
             logger.info("[PIPELINE_RL_SERVICE] Starting background training task")
             self._train_task = asyncio.create_task(
                 train(
-                    trainer=self._state.trainer,
-                    results_queue=self._state.results_queue,
+                    trainer=self.state.trainer,
+                    results_queue=self.state.results_queue,
                 )
             )
             warmup = True
@@ -397,8 +397,8 @@ class PipelineRLService:
                     # Precalculate logprobs if needed
                     packed_tensors["logprobs"] = torch.cat(
                         [
-                            self._state.trainer.compute_loss(
-                                self._state.peft_model,
+                            self.state.trainer.compute_loss(
+                                self.state.peft_model,
                                 TrainInputs(
                                     **{
                                         k: v[_offset : _offset + 1]
@@ -421,7 +421,7 @@ class PipelineRLService:
                     ).to("cpu")
                     precalculate_logprobs = False
 
-                self._state.inputs_queue.put_nowait(
+                self.state.inputs_queue.put_nowait(
                     TrainInputs(
                         **{
                             k: (
@@ -457,7 +457,7 @@ class PipelineRLService:
                 # Wait for a result from the queue or for the training task to raise an exception
                 done, _ = await asyncio.wait(
                     [
-                        asyncio.create_task(self._state.results_queue.get()),
+                        asyncio.create_task(self.state.results_queue.get()),
                         self._train_task,
                     ],
                     return_when=asyncio.FIRST_COMPLETED,
@@ -469,7 +469,7 @@ class PipelineRLService:
                 for task in done:
                     result = task.result()
                     assert result is not None, "The training task should never finish."
-                    self._state.results_queue.task_done()
+                    self.state.results_queue.task_done()
 
                     if warmup:
                         from ..unsloth.train import gc_and_empty_cuda_cache
@@ -487,7 +487,7 @@ class PipelineRLService:
         next_step = get_step_from_dir(self.output_dir) + 1
         checkpoint_dir = get_step_checkpoint_dir(self.output_dir, next_step)
         os.makedirs(checkpoint_dir, exist_ok=True)
-        self._state.trainer.save_model(checkpoint_dir)
+        self.state.trainer.save_model(checkpoint_dir)
 
         logger.info(f"[PIPELINE_RL_SERVICE] Saved checkpoint to {checkpoint_dir}")
         logger.info(
