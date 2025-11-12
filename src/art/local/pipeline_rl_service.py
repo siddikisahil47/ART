@@ -15,15 +15,11 @@ from functools import cached_property
 from typing import TYPE_CHECKING, AsyncIterator, cast
 
 import peft
+import torch
 from datasets import Dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils.dummy_pt_objects import GenerationMixin, PreTrainedModel
 from trl import GRPOConfig, GRPOTrainer
-
-# Import torch only for type checking to avoid CUDA initialization
-# The actual import happens in state after setting CUDA_VISIBLE_DEVICES
-if TYPE_CHECKING:
-    import torch
 
 from .. import dev, types
 from ..local.checkpoints import get_last_checkpoint_dir
@@ -45,23 +41,28 @@ class CausalLM(PreTrainedModel, GenerationMixin):
 
     pass
 
+
 # copied from src/art/unsloth/decoupled_service.py
 class TrainInputs(PackedTensors):
     """Training inputs extending PackedTensors with config."""
+
     config: types.TrainConfig
     _config: dev.TrainConfig
     return_new_logprobs: bool
+
 
 # copied from src/art/unsloth/decoupled_service.py
 @dataclass
 class UnslothState:
     """State for Unsloth training."""
+
     model: CausalLM
     tokenizer: PreTrainedTokenizerBase
     peft_model: peft.peft_model.PeftModelForCausalLM
     trainer: GRPOTrainer
     inputs_queue: asyncio.Queue[TrainInputs]
     results_queue: asyncio.Queue[dict[str, float]]
+
 
 @dataclass
 class PipelineRLService:
@@ -99,38 +100,80 @@ class PipelineRLService:
 
         This is similar to DecoupledUnslothService._state but without any
         sleep/wake logic. The model is initialized once and kept in memory.
+
+        IMPORTANT: This should be called AFTER setting CUDA_VISIBLE_DEVICES
+        to ensure the trainer runs on the correct GPU (typically GPU 0).
         """
         import unsloth
 
+        logger.info("=" * 80)
+        logger.info("[PIPELINE_RL_SERVICE] Initializing trainer state")
+        logger.info("=" * 80)
+        logger.info(f"[PIPELINE_RL_SERVICE] Model: {self.model_name}")
+        logger.info(f"[PIPELINE_RL_SERVICE] Base model: {self.base_model}")
+        logger.info(f"[PIPELINE_RL_SERVICE] Output dir: {self.output_dir}")
+        logger.info("")
+
+        # Get trainer GPU IDs from config (default to [0])
+        trainer_gpu_ids = self.config.get("trainer_gpu_ids", [0])
+        if not trainer_gpu_ids:
+            trainer_gpu_ids = [0]
+
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Trainer GPU configuration: {trainer_gpu_ids}"
+        )
+
+        # Set CUDA_VISIBLE_DEVICES for trainer before initializing model
+        original_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        trainer_gpu_str = ",".join(str(gpu_id) for gpu_id in trainer_gpu_ids)
+        os.environ["CUDA_VISIBLE_DEVICES"] = trainer_gpu_str
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Setting CUDA_VISIBLE_DEVICES={trainer_gpu_str} for trainer"
+        )
+        logger.info(f"[PIPELINE_RL_SERVICE]   (original was: {original_cuda_visible})")
+        logger.info("")
+
         # Initialize Unsloth model
-        logger.info("[PIPELINE_RL_SERVICE] Initializing Unsloth state...")
+        logger.info("[PIPELINE_RL_SERVICE] Step 1: Loading model...")
         init_args = self.config.get("init_args", {})
         checkpoint_dir = get_last_checkpoint_dir(self.output_dir)
         if checkpoint_dir:
-            logger.info(f"[PIPELINE_RL_SERVICE] Loading from checkpoint: {checkpoint_dir}")
+            logger.info(
+                f"[PIPELINE_RL_SERVICE]   Loading from checkpoint: {checkpoint_dir}"
+            )
             init_args["model_name"] = checkpoint_dir
         else:
-            logger.info(f"[PIPELINE_RL_SERVICE] Loading base model: {self.base_model}")
+            logger.info(
+                f"[PIPELINE_RL_SERVICE]   Loading base model: {self.base_model}"
+            )
             init_args["model_name"] = self.base_model
+
+        logger.info(f"[PIPELINE_RL_SERVICE]   Process PID: {os.getpid()}")
+        logger.info(
+            f"[PIPELINE_RL_SERVICE]   CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}"
+        )
 
         model, tokenizer = cast(
             tuple[CausalLM, PreTrainedTokenizerBase],
             unsloth.FastLanguageModel.from_pretrained(**init_args),
         )
 
-        logger.info(
-            f"[PIPELINE_RL_SERVICE] Model loaded successfully on device: {model.device}"
-        )
+        logger.info(f"[PIPELINE_RL_SERVICE]   Model loaded on device: {model.device}")
+        logger.info("")
 
         # Initialize PEFT model
+        logger.info("[PIPELINE_RL_SERVICE] Step 2: Initializing PEFT model...")
         peft_model = cast(
             peft.peft_model.PeftModelForCausalLM,
             unsloth.FastLanguageModel.get_peft_model(
                 model, **self.config.get("peft_args", {})
             ),
         )
+        logger.info(f"[PIPELINE_RL_SERVICE]   PEFT model initialized")
+        logger.info("")
 
         # Initialize trainer with dummy dataset
+        logger.info("[PIPELINE_RL_SERVICE] Step 3: Initializing GRPOTrainer...")
         data = {"prompt": ""}
         trainer = GRPOTrainer(
             model=peft_model,  # type: ignore
@@ -140,11 +183,14 @@ class PipelineRLService:
             processing_class=tokenizer,
         )
 
+        logger.info(f"[PIPELINE_RL_SERVICE]   Trainer device: {trainer.args.device}")
         logger.info(
-            f"[PIPELINE_RL_SERVICE] Trainer created successfully on device: {trainer.args.device}"
+            f"[PIPELINE_RL_SERVICE]   Trainer accelerator device: {trainer.accelerator.device}"
         )
+        logger.info("")
 
         # Initialize queues
+        logger.info("[PIPELINE_RL_SERVICE] Step 4: Initializing queues...")
         inputs_queue: asyncio.Queue[TrainInputs] = asyncio.Queue()
         results_queue: asyncio.Queue[dict[str, float]] = asyncio.Queue()
 
@@ -160,8 +206,15 @@ class PipelineRLService:
             return cast(dict[str, torch.Tensor], inputs)
 
         trainer._prepare_inputs = _async_prepare_inputs
+        logger.info("[PIPELINE_RL_SERVICE]   Queues initialized")
+        logger.info("")
 
-        logger.info("[PIPELINE_RL_SERVICE] Unsloth state initialized")
+        logger.info("[PIPELINE_RL_SERVICE] Trainer state initialization complete!")
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] CUDA_VISIBLE_DEVICES remains set to {trainer_gpu_str} for trainer process"
+        )
+        logger.info("=" * 80)
+        logger.info("")
 
         return UnslothState(
             model=model,
@@ -172,18 +225,58 @@ class PipelineRLService:
             results_queue=results_queue,
         )
 
-    async def start_openai_server(
+    async def initialize_process_groups_and_vllm(
         self, config: dev.OpenAIServerConfig | None
-    ) -> None:
-        """
-        Start vLLM OpenAI-compatible server (standard mode, no weight updates yet).
+    ):
+        logger.info("[PIPELINE_RL_SERVICE] Initializing state...")
+        _ = self.state
+        # Initialize process group
+        logger.info("[PIPELINE_RL_SERVICE] Initializing process group...")
+        init_method, world_size = await self._init_process_group_for_weight_updates(
+            len(self.config.get("inference_gpu_ids", [1]))
+        )
+        logger.info(
+            f"[PIPELINE_RL_SERVICE] Process group initialized: {init_method}, {world_size}"
+        )
 
-        This is the basic version used for conventional RL. For PipelineRL with
-        weight updates, use start_openai_server_with_weight_updates().
+        # Start vLLM server
+        logger.info("[PIPELINE_RL_SERVICE] Starting vLLM server...")
+        await self.start_openai_server_with_weight_updates(
+            config=config,
+            init_method=init_method,
+            world_size=world_size,
+            actor_idx=0,
+            inference_gpu_ids=self.config.get("inference_gpu_ids", [1]),
+        )
+        logger.info("[PIPELINE_RL_SERVICE] vLLM server started")
+
+        # Join process group
+        logger.info("[PIPELINE_RL_SERVICE] Joining process group...")
+        self._actor_update_group = await self._join_process_group_as_trainer(
+            init_method=init_method,
+            world_size=world_size,
+        )
+        logger.info("[PIPELINE_RL_SERVICE] Process group joined")
+
+        # Wait for vLLM server to be ready
+        logger.info("[PIPELINE_RL_SERVICE] Waiting for vLLM server to be ready...")
+        server_config = config or dev.OpenAIServerConfig()
+        server_args = server_config.get("server_args", {})
+        base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
+        await self._wait_for_vllm_ready(base_url)
+        logger.info("[PIPELINE_RL_SERVICE] vLLM server is ready")
+
+    async def start_openai_server(self, config: dev.OpenAIServerConfig | None) -> None:
         """
-        logger.info("[PIPELINE_RL_SERVICE] Starting vLLM server (standard mode)")
-        # TODO: Implement standard vLLM startup
-        # For now, raise NotImplementedError
+        Skip this function, vLLM server is initiated to `initialize_process_groups_and_vllm`
+        """
+        pass
+
+    async def stop_openai_server(self) -> None:
+        """
+        TODO
+        """
+        pass
 
     async def start_openai_server_with_weight_updates(
         self,
@@ -615,6 +708,54 @@ class PipelineRLService:
                 raise
 
         logger.info(f"[LORA_SWAP] Swap complete!")
+
+    async def _set_lora(
+        self, lora_path: str, base_url: str = "http://localhost:8000"
+    ) -> None:
+        """
+        Set the LoRA adapter in vLLM via HTTP API.
+
+        Args:
+            lora_path: Path to the LoRA checkpoint directory
+            base_url: Base URL of the vLLM server
+        """
+        logger.info(f"[SET_LORA] Setting LoRA adapter: {lora_path}")
+        logger.info(f"[SET_LORA] vLLM server URL: {base_url}")
+
+        import aiohttp
+
+        # vLLM's LoRA management endpoint
+        load_lora_url = f"{base_url}/v1/load_lora_adapter"
+
+        async with aiohttp.ClientSession() as session:
+            # Prepare request payload
+            payload = {
+                "lora_name": self.model_name,
+                "lora_int_id": 1,
+                "lora_path": lora_path,
+            }
+            logger.info(f"[SET_LORA]   Request URL: {load_lora_url}")
+            logger.info(f"[SET_LORA]   Request payload: {payload}")
+
+            try:
+                async with session.post(
+                    load_lora_url,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    response_text = await response.text()
+                    logger.info(f"[SET_LORA]   Response status: {response.status}")
+                    logger.info(f"[SET_LORA]   Response text: {response_text}")
+
+                    if response.status == 200:
+                        logger.info("[SET_LORA]   LoRA adapter loaded successfully")
+                    else:
+                        raise RuntimeError(
+                            f"Failed to load LoRA adapter (status {response.status}): {response_text}"
+                        )
+            except Exception as e:
+                logger.error(f"[SET_LORA]   Failed to load LoRA adapter: {e}")
+                raise
 
     def _get_free_port(self) -> int:
         """

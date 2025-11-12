@@ -126,6 +126,8 @@ class InternalModelConfig(TypedDict, total=False):
     trainer_args: "TrainerArgs"
     torchtune_args: TorchtuneArgs | None
     _use_pipeline_rl: bool
+    trainer_gpu_ids: list[int]
+    inference_gpu_ids: list[int]
 
 
 class TinkerArgs(TypedDict, total=False):
