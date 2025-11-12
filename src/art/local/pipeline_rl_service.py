@@ -643,3 +643,142 @@ class PipelineRLService:
                 raise
 
         logger.info(f"[LORA_SWAP] Swap complete!")
+
+    def _get_free_port(self) -> int:
+        """
+        Find a free TCP port for process group initialization.
+
+        Returns:
+            int: A free port number
+        """
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            s.listen(1)
+            port = s.getsockname()[1]
+        return port
+
+    async def _init_process_group_for_weight_updates(
+        self,
+        model: TrainableModel,
+        num_actor_gpus: int,
+    ) -> tuple[str, int]:
+        """
+        Initialize process group for weight updates (Phase 1: setup infrastructure).
+
+        This creates the TCP rendezvous endpoint that will be used by both the trainer
+        and vLLM to coordinate weight updates via NCCL.
+
+        Args:
+            model: The trainable model
+            num_actor_gpus: Number of GPUs dedicated to vLLM generation
+
+        Returns:
+            tuple: (init_method, world_size) for process group initialization
+        """
+        # Get free port for TCP rendezvous
+        port = self._get_free_port()
+        init_method = f"tcp://localhost:{port}"
+        world_size = 1 + num_actor_gpus  # trainer (1) + actor GPUs
+
+        logger.info("[INIT_PG] Step 1: Creating TCP endpoint")
+        logger.info(f"[INIT_PG]   init_method: {init_method}")
+        logger.info(f"[INIT_PG]   world_size: {world_size}")
+        logger.info(f"[INIT_PG]   num_actor_gpus: {num_actor_gpus}")
+
+        # Return init_method for vLLM to use
+        # Trainer will join after vLLM starts
+        return init_method, world_size
+
+    async def _join_process_group_as_trainer(
+        self,
+        init_method: str,
+        world_size: int,
+    ) -> torch.distributed.ProcessGroup:
+        """
+        Join process group as trainer (rank 0).
+
+        This should be called AFTER vLLM has started and is waiting to join
+        the process group. The vLLM process will block until this method
+        is called.
+
+        Args:
+            init_method: TCP endpoint (e.g., "tcp://localhost:12345")
+            world_size: Total processes in group
+
+        Returns:
+            ProcessGroup: The initialized NCCL process group
+        """
+        from .torch_utils import init_extra_process_group
+
+        logger.info("[INIT_PG] Step 4: Trainer joining process group as rank 0")
+        logger.info(f"[INIT_PG]   This will BLOCK until vLLM joins...")
+
+        pg = init_extra_process_group(
+            backend="nccl",
+            init_method=init_method,
+            rank=0,
+            world_size=world_size,
+            group_name="actor",
+        )
+
+        logger.info("[INIT_PG] Step 5: Process group initialized successfully!")
+        return pg
+
+    async def _wait_for_vllm_ready(self, base_url: str, timeout: float = 120.0) -> None:
+        """
+        Wait for vLLM server to be ready by polling the /v1/models endpoint.
+
+        Args:
+            base_url: Base URL of the vLLM server (e.g., "http://localhost:8000")
+            timeout: Maximum time to wait in seconds (default: 120)
+
+        Raises:
+            TimeoutError: If server doesn't become ready within timeout
+        """
+        logger.info(f"[WAIT_VLLM] Waiting for vLLM server at {base_url} to be ready...")
+        logger.info(f"[WAIT_VLLM]   Timeout: {timeout}s")
+
+        import time
+
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key="EMPTY", base_url=base_url)
+        start_time = time.time()
+
+        while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise TimeoutError(
+                    f"vLLM server at {base_url} did not become ready within {timeout}s. "
+                    f"Check the vLLM logs in the model output directory."
+                )
+
+            try:
+                # Try to list models - this will succeed when vLLM is ready
+                logger.info(
+                    f"[WAIT_VLLM]   Attempting to list models (elapsed: {elapsed:.1f}s)..."
+                )
+                models = await client.models.list()
+
+                # Try to iterate and get model IDs
+                model_ids = []
+                try:
+                    # models might be a Page object or SyncPage, need to handle iteration carefully
+                    async for model in models:
+                        model_ids.append(model.id)
+                except TypeError:
+                    # Not async iterable, try regular iteration
+                    for model in models:
+                        model_ids.append(model.id)
+
+                # If we successfully got models, vLLM is ready
+                logger.info(f"[WAIT_VLLM] vLLM is ready! Available models: {model_ids}")
+                return
+            except Exception as e:
+                # vLLM not ready yet, wait and retry
+                logger.info(
+                    f"[WAIT_VLLM]   Not ready yet ({elapsed:.1f}s): {type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(0.5)
