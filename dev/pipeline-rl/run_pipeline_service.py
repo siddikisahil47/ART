@@ -14,6 +14,9 @@ import asyncio
 import logging
 import os
 
+from openai import AsyncOpenAI
+from pydantic import BaseModel
+
 import art
 from art.dev.model import InternalModelConfig
 from art.local.backend import LocalBackend
@@ -68,6 +71,53 @@ logging.getLogger("art.local.pipeline_rl_service").setLevel(logging.INFO)
 logging.getLogger("art.unsloth").setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
+
+
+class ReverseStringScenario(BaseModel):
+    input: str
+
+
+class TrainingScenario(BaseModel):
+    step: int
+    data: ReverseStringScenario
+
+
+async def rollout(
+    model: art.TrainableModel, scenario: TrainingScenario
+) -> art.Trajectory:
+    client = AsyncOpenAI(
+        base_url=model.inference_base_url,
+        api_key=model.inference_api_key,
+    )
+    trajectory = art.Trajectory(
+        messages_and_choices=[
+            {
+                "role": "system",
+                "content": "You are a string reverser. You will be given a string and you will need to reverse it. Return the reversed string.",
+            }
+        ],
+        metadata={
+            "step": scenario.step,
+        },
+        reward=0,
+    )
+    trajectory.messages_and_choices.append(
+        {
+            "role": "user",
+            "content": scenario.data.input,
+        }
+    )
+    response = await client.chat.completions.create(
+        messages=trajectory.messages(),
+        model=model.get_inference_name(),
+        logprobs=True,
+    )
+    trajectory.messages_and_choices.append(response.choices[0])
+    if response.choices[0].message.content == scenario.data.input[::-1]:
+        trajectory.reward = 1.0
+    else:
+        trajectory.reward = 0.0
+    return trajectory
 
 
 async def main():
