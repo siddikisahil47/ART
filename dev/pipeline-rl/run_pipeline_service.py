@@ -178,6 +178,33 @@ async def main():
     logger.info("")
     logger.info("Verify with: nvidia-smi")
     logger.info("")
+    for step in range(20):
+        logger.info(f"[GENERATION] Starting generation step {step}")
+        try:
+            trajectory_groups = await art.gather_trajectory_groups(
+                (
+                    art.TrajectoryGroup(
+                        rollout(
+                            model,
+                            TrainingScenario(
+                                step=step, data=ReverseStringScenario(input="hello")
+                            ),
+                        )
+                        for _ in range(1)
+                    )
+                    for _ in range(1)
+                ),
+                pbar_desc=f"generate_step_{step}",
+                max_exceptions=1,
+            )
+
+            logger.info(
+                f"[GENERATION] Putting {len(trajectory_groups)} groups in queue"
+            )
+
+        except Exception as e:
+            logger.error(f"[GENERATION] Error in step {step}: {e}")
+
     logger.info("Press Ctrl+C to stop...")
 
     # Keep the script running so we can see the processes
