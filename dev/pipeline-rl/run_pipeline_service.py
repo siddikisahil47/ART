@@ -10,9 +10,11 @@ Usage:
     CUDA_VISIBLE_DEVICES=0,1 uv run python dev/pipeline-rl/run_pipeline_service.py
 """
 
+import argparse
 import asyncio
 import logging
 import os
+from time import sleep
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -120,7 +122,9 @@ async def rollout(
     return trajectory
 
 
-async def main():
+async def main(
+    num_steps: int, rollouts_per_group: int, groups_per_step: int, sleep_per_step: int
+):
     logger.info("=" * 80)
     logger.info("PipelineRL Service Test")
     logger.info("=" * 80)
@@ -178,7 +182,10 @@ async def main():
     logger.info("")
     logger.info("Verify with: nvidia-smi")
     logger.info("")
-    for step in range(20):
+    logger.info(f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}")
+    logger.info("")
+    for step in range(num_steps):
+        sleep(sleep_per_step)
         logger.info(f"[GENERATION] Starting generation step {step}")
         try:
             trajectory_groups = await art.gather_trajectory_groups(
@@ -190,9 +197,9 @@ async def main():
                                 step=step, data=ReverseStringScenario(input="hello")
                             ),
                         )
-                        for _ in range(1)
+                        for _ in range(rollouts_per_group)
                     )
-                    for _ in range(1)
+                    for _ in range(groups_per_step)
                 ),
                 pbar_desc=f"generate_step_{step}",
                 max_exceptions=1,
@@ -218,4 +225,40 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(
+        description="PipelineRL Service Test Script",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=100,
+        help="Number of training steps to run",
+    )
+    parser.add_argument(
+        "--rollouts-per-group",
+        type=int,
+        default=1,
+        help="Number of rollouts per trajectory group",
+    )
+    parser.add_argument(
+        "--groups-per-step",
+        type=int,
+        default=1,
+        help="Number of trajectory groups per step",
+    )
+    parser.add_argument(
+        "--sleep-per-step",
+        type=int,
+        default=0,
+        help="Amount of time (s) to wait between each step",
+    )
+    args = parser.parse_args()
+    asyncio.run(
+        main(
+            args.num_steps,
+            args.rollouts_per_group,
+            args.groups_per_step,
+            args.sleep_per_step,
+        )
+    )
