@@ -81,4 +81,5 @@ def get_model_config(
         trainer_args=trainer_args,
         torchtune_args=torchtune_args,
         _use_pipeline_rl=config.get("_use_pipeline_rl", False),
+        _async_rl=config.get("_async_rl", False),
     )

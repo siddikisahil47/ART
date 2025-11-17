@@ -159,6 +159,9 @@ class LocalBackend(Backend):
                 inference_gpu_ids = config.get("inference_gpu_ids", None)
                 logger.info(f"[BACKEND]   Trainer GPUs: {trainer_gpu_ids}")
                 logger.info(f"[BACKEND]   Inference GPUs: {inference_gpu_ids}")
+            elif config.get("_async_rl", False):
+                service_class = AsyncService
+                logger.info("[BACKEND] Using AsyncService")
             else:
                 from ..unsloth.service import UnslothService
 
