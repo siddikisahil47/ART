@@ -366,16 +366,28 @@ class PipelineRLService:
             str(world_size),
             "--actor-llm-idx",
             str(actor_idx),
+            "--gpu-memory-utilization",
+            str(0.8),
+            "--max-model-len",
+            str(32768),
+            "--full-cuda-graph",
+            "--cudagraph-num-of-warmups",
+            str(1),
+            "--cudagraph-capture-sizes",
+            "400,392,384,376,368,360,352,344,336,328,320,312,304,296,288,280,272,264,256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1",
+            "--cudagraph-max-capture-size",
+            "400",
+            "--enable-prefix-caching",
             "--enable-lora",
         ]
 
         # Add optional server args from config
-        if "max_model_len" in server_args:
-            cmd.extend(["--max-model-len", str(server_args["max_model_len"])])
-        if "gpu_memory_utilization" in server_args:
-            cmd.extend(
-                ["--gpu-memory-utilization", str(server_args["gpu_memory_utilization"])]
-            )
+        # if "max_model_len" in server_args:
+        #     cmd.extend(["--max-model-len", str(server_args["max_model_len"])])
+        # if "gpu_memory_utilization" in server_args:
+        #     cmd.extend(
+        #         ["--gpu-memory-utilization", str(server_args["gpu_memory_utilization"])]
+        #     )
         if "tensor_parallel_size" in server_args:
             cmd.extend(
                 ["--tensor-parallel-size", str(server_args["tensor_parallel_size"])]
