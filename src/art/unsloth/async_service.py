@@ -159,10 +159,16 @@ class AsyncService:
         logger.info(
             f"[ASYNC_SERVICE]  using in_flight_server.py at: {vllm_server_script}"
         )
+        lora_path = get_last_checkpoint_dir(self.output_dir)
+        if lora_path is None:
+            lora_path = get_step_checkpoint_dir(self.output_dir, 0)
+            os.makedirs(os.path.dirname(lora_path), exist_ok=True)
+            self.state.trainer.save_model(lora_path)
         config = dev.get_openai_server_config(
             model_name=self.model_name,
             base_model=self.base_model,
             log_file=f"{self.output_dir}/logs/vllm.log",
+            lora_path=lora_path,
             config=config,
         )
         engine_args = {**config.get("engine_args", {}), "enable_lora": True}
