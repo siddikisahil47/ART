@@ -165,8 +165,10 @@ class AsyncService:
             log_file=f"{self.output_dir}/logs/vllm.log",
             config=config,
         )
-        engine_args = config.get("engine_args", {})
+        engine_args = {**config.get("engine_args", {}), "enable_lora": True}
+        logger.info(f"[ASYNC_SERVICE]  engine_args: {engine_args}")
         server_args = config.get("server_args", {})
+        logger.info(f"[ASYNC_SERVICE]  server_args: {server_args}")
         vllm_args = [
             *[
                 f"--{key.replace('_', '-')}{f'={item}' if item is not True else ''}"
@@ -176,6 +178,7 @@ class AsyncService:
                 if item is not None
             ],
         ]
+        logger.info(f"[ASYNC_SERVICE]  vllm_args: {vllm_args}")
         inference_cmd = ["uv", "run", vllm_server_script, *vllm_args]
         log_dir = os.path.join(self.output_dir, "logs")
         logger.info(f"[ASYNC_SERVICE]  log_dir: {log_dir}")
