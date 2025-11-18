@@ -415,19 +415,19 @@ class AsyncService:
                         warmup = False
                     else:
                         yield result
-            if verbose:
-                print("Saving new LoRA adapter...")
-            # Save the new LoRA adapter
-            next_step = get_step_from_dir(self.output_dir) + 1
-            checkpoint_dir = get_step_checkpoint_dir(self.output_dir, next_step)
-            os.makedirs(os.path.dirname(checkpoint_dir), exist_ok=True)
-            self.state.trainer.save_model(checkpoint_dir)
-            if verbose:
-                print("Setting new LoRA adapter...")
-            # Set the new LoRA adapter
-            await self._set_lora(checkpoint_dir)
-            if verbose:
-                print("New LoRA adapter set")
+        if verbose:
+            print("Saving new LoRA adapter...")
+        # Save the new LoRA adapter
+        next_step = get_step_from_dir(self.output_dir) + 1
+        checkpoint_dir = get_step_checkpoint_dir(self.output_dir, next_step)
+        os.makedirs(os.path.dirname(checkpoint_dir), exist_ok=True)
+        self.state.trainer.save_model(checkpoint_dir)
+        if verbose:
+            print("Setting new LoRA adapter...")
+        # Set the new LoRA adapter
+        await self._set_lora(checkpoint_dir)
+        if verbose:
+            print("New LoRA adapter set")
 
         if verbose:
             print("ModelService.train complete")
