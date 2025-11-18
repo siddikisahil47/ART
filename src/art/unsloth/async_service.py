@@ -7,17 +7,20 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
-from datasets import Dataset
+import httpx
 import peft
 import torch
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.arg_utils import AsyncEngineArgs
 import unsloth
+from datasets import Dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils.dummy_pt_objects import GenerationMixin, PreTrainedModel
 from trl import GRPOConfig, GRPOTrainer
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 
+from art.dev.openai_server import ServerArgs
 from art.local.checkpoints import get_last_checkpoint_dir
+from art.nccl import NCCLBroadcastSender
 from art.utils.get_model_step import get_step_from_dir
 
 from .. import dev, types
@@ -61,6 +64,7 @@ class AsyncService:
     output_dir: str
     _openai_server_task: asyncio.Task[None] | None = None
     _train_task: asyncio.Task[None] | None = None
+    nccl_broadcast: NCCLBroadcastSender | None = None
 
     @functools.cached_property
     def state(self) -> AsyncState:
@@ -195,6 +199,9 @@ class AsyncService:
         await self._wait_for_vllm_ready(base_url, server_args.get("api_key", "default"))
         logger.info("[ASYNC_SERVICE] vLLM server is ready")
 
+        # Initialize broadcaster
+        await self._init_broadcaster(server_args)
+
     async def _wait_for_vllm_ready(self, base_url: str, api_key: str) -> None:
         """
         Wait for vLLM server to be ready by polling the /v1/models endpoint.
@@ -216,6 +223,72 @@ class AsyncService:
                     return
             except:  # noqa: E722
                 await asyncio.sleep(0.1)
+
+    async def _init_broadcaster(self, server_args: ServerArgs) -> None:
+        """
+        Initialize the broadcaster by calling the /init_broadcaster endpoint.
+        """
+
+        host = server_args.get("host", "0.0.0.0")
+        port = server_args.get("port", 8000)
+        server_url = f"http://{host}:{port}"
+
+        payload = {
+            "host": "0.0.0.0",
+            "port": 29500,
+            "server_rank": 0,
+            "num_inference_server": 1,
+            "timeout": 300,
+        }
+
+        async def _init_nccl_broadcast_sender() -> NCCLBroadcastSender:
+            logger.info(
+                f"[ASYNC_SERVICE] Initializing NCCLBroadcastSender on device {torch.cuda.current_device()}"
+            )
+            broadcast_sender = NCCLBroadcastSender(
+                host="0.0.0.0",
+                port=29500,
+                rank=0,
+                world_size=2,
+                device=torch.cuda.current_device(),
+                logger=logger,
+                timeout=300,
+            )
+            logger.info(
+                f"[ASYNC_SERVICE] NCCLBroadcastSender initialized on device {torch.cuda.current_device()}"
+            )
+            return broadcast_sender
+
+        async def _init_nccl_broadcast_receiver() -> None:
+            async with httpx.AsyncClient(timeout=300) as client:
+                try:
+                    logger.info(
+                        f"[ASYNC_SERVICE] Initializing NCCLBroadcastReceiver with url: {server_url}/init_broadcaster"
+                    )
+                    response = await client.post(
+                        f"{server_url}/init_broadcaster",
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    logger.info("[ASYNC_SERVICE] Broadcaster initialized successfully")
+                except Exception as e:
+                    logger.warning(
+                        f"[ASYNC_SERVICE] Failed to initialize broadcaster: {e}"
+                    )
+
+        # TODO: Instead of sleeping, we can consider using different processes/background threads to ensure the sender does not block
+        # 1. Initialize the receiver and wait for 1 second to ensure the POST request is sent
+        receiver_task = asyncio.create_task(_init_nccl_broadcast_receiver())
+        await asyncio.sleep(1)
+        # 2. Initialize the sender (blocking)
+        broadcast_sender = await _init_nccl_broadcast_sender()
+        # 3. Wait for the receiver to finish initializing
+        await receiver_task
+
+        self.nccl_broadcast = broadcast_sender
+        logger.info(
+            f"[ASYNC_SERVICE] NCCLBroadcastSender initialized: {self.nccl_broadcast}"
+        )
 
     async def vllm_engine_is_sleeping(self) -> bool:
         return False
