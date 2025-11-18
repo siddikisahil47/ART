@@ -22,6 +22,7 @@ from art.dev.openai_server import ServerArgs
 from art.local.checkpoints import get_last_checkpoint_dir
 from art.nccl import NCCLBroadcastSender
 from art.utils.get_model_step import get_step_from_dir
+from art.utils.output_dirs import get_step_checkpoint_dir
 
 from .. import dev, types
 from ..preprocessing.pack import (
@@ -194,6 +195,7 @@ class AsyncService:
                 inference_cmd,
                 env={
                     **os.environ,
+                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, inference_gpu_ids)),
                 },
                 stdout=log_file,
@@ -416,8 +418,6 @@ class AsyncService:
             if verbose:
                 print("Saving new LoRA adapter...")
             # Save the new LoRA adapter
-            from ..utils.output_dirs import get_step_checkpoint_dir
-
             next_step = get_step_from_dir(self.output_dir) + 1
             checkpoint_dir = get_step_checkpoint_dir(self.output_dir, next_step)
             os.makedirs(os.path.dirname(checkpoint_dir), exist_ok=True)
@@ -425,16 +425,37 @@ class AsyncService:
             if verbose:
                 print("Setting new LoRA adapter...")
             # Set the new LoRA adapter
-            self._set_lora(checkpoint_dir)
+            await self._set_lora(checkpoint_dir)
             if verbose:
                 print("New LoRA adapter set")
 
         if verbose:
             print("ModelService.train complete")
 
-    def _set_lora(self, lora_path: str) -> None:
+    async def _set_lora(self, lora_path: str) -> None:
         """Sets the LoRA adapter with ID 1 in the vLLM engine."""
-        # Note: For AsyncService, LoRA is managed by the separate vLLM server process
-        # This method is a placeholder for compatibility with the training loop
-        # The actual LoRA loading happens in the vLLM server process
-        pass
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Setting LoRA adapter: {lora_path}")
+        base_url = f"http://localhost:8000"
+        api_key = "default"
+        # unload the old LoRA adapter
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(
+                f"{base_url}/v1/unload_lora_adapter",
+                json={"lora_name": self.model_name, "lora_int_id": 1},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            response.raise_for_status()
+            logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter unloaded successfully")
+        # load the new LoRA adapter
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(
+                f"{base_url}/v1/load_lora_adapter",
+                json={
+                    "lora_name": self.model_name,
+                    "lora_int_id": 1,
+                    "lora_path": lora_path,
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            response.raise_for_status()
+            logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter loaded successfully") 
