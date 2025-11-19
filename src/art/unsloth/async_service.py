@@ -170,10 +170,11 @@ class AsyncService:
             model_name=self.model_name,
             base_model=self.base_model,
             log_file=f"{self.output_dir}/logs/vllm.log",
-            lora_path=lora_path,
+            # lora_path=lora_path,
             config=config,
         )
-        engine_args = {**config.get("engine_args", {}), "enable_lora": True}
+        # engine_args = {**config.get("engine_args", {}), "enable_lora": True}
+        engine_args = {**config.get("engine_args", {})}
         logger.info(f"[ASYNC_SERVICE]  engine_args: {engine_args}")
         server_args = config.get("server_args", {})
         logger.info(f"[ASYNC_SERVICE]  server_args: {server_args}")
@@ -196,7 +197,7 @@ class AsyncService:
                 inference_cmd,
                 env={
                     **os.environ,
-                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+                    # "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, inference_gpu_ids)),
                 },
                 stdout=log_file,
