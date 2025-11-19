@@ -374,42 +374,94 @@ async def main(
     logger.info("")
     logger.info(f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}")
 
-    for step in range(num_steps):
-        logger.info(f"[GENERATION] Starting generation step {step}")
-        try:
-            trajectory_groups = await art.gather_trajectory_groups(
-                (
-                    art.TrajectoryGroup(
-                        rollout(
-                            model,
-                            Scenario2048(step=i)
+    trajectory_queue = asyncio.Queue(maxsize=50)
+    metrics_queue = asyncio.Queue()
+
+    # Generation task
+    async def generation_task():
+        for step in range(num_steps):
+            logger.info(f"[GENERATION] Starting generation step {step}")
+
+            try:
+                # Generate 2048 game trajectories using standard ART pattern
+                trajectory_groups = await art.gather_trajectory_groups(
+                    (
+                        art.TrajectoryGroup(
+                            rollout(model, Scenario2048(step=step))
+                            for _ in range(rollouts_per_group)
                         )
-                        for _ in range(rollouts_per_group)
-                    )
-                    for i in range(groups_per_step)
-                ),
-                pbar_desc=f"generate_step_{step}",
-                max_exceptions=rollouts_per_group*groups_per_step,
-            )
+                        for i in range(groups_per_step)
+                    ),
+                    pbar_desc=f"generate_step_{step}",
+                    max_exceptions=rollouts_per_group * groups_per_step,
+                )
 
+                logger.info(
+                    f"[GENERATION] Putting {len(trajectory_groups)} groups in queue"
+                )
+                await trajectory_queue.put(trajectory_groups)
+
+                logger.info(f"[GENERATION] Completed generation step {step}")
+
+            except Exception as e:
+                logger.error(f"[GENERATION] Error in step {step}: {e}")
+                raise
+
+        # Signal end
+        await trajectory_queue.put(None)
+        logger.info("[GENERATION] Generation task complete")
+
+    # Training task
+    async def training_task():
+        training_step = 0
+
+        while True:
             logger.info(
-                f"[GENERATION] Putting {len(trajectory_groups)} groups in queue"
+                f"[TRAINING] Waiting for trajectories (queue size: {trajectory_queue.qsize()}/50)"
             )
-        except Exception as e:
-            logger.error(f"[GENERATION] Error in step {step}: {e}")
+            trajectory_groups = await trajectory_queue.get()
 
+            if trajectory_groups is None:
+                logger.info("[TRAINING] Received end signal")
+                break
 
-        logger.info(f"[TRAINING] Starting training step {step}")
-        logger.info(
-            f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups"
-        )
-        try:
-            await model.train(trajectory_groups, config=art.TrainConfig(), _config=art.dev.TrainConfig())
-        except Exception as e:
-            logger.error(f"[TRAINING] Error in step {step}: {e}")
-            raise
-        logger.info(f"[TRAINING] Completed training step {step}")
+            logger.info(f"[TRAINING] Starting training step {training_step}")
+            logger.info(
+                f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups"
+            )
 
+            try:
+                await model.train(
+                    trajectory_groups,
+                    config=art.TrainConfig(),
+                    _config=art.dev.TrainConfig(),
+                )
+
+                training_step += 1
+                logger.info(f"[TRAINING] Completed training step {training_step}")
+
+                trajectory_queue.task_done()
+
+            except Exception as e:
+                logger.error(f"[TRAINING] Error in step {training_step}: {e}")
+                raise
+
+        # Signal end
+        await metrics_queue.put(None)
+        logger.info("[TRAINING] Training task complete")
+
+    gen_task = asyncio.create_task(generation_task())
+    train_task = asyncio.create_task(training_task())
+
+    # Yield metrics as they arrive
+    while True:
+        metrics = await metrics_queue.get()
+        if metrics is None:
+            break
+        logger.info(f"Training metrics: {metrics}")
+
+    # Wait for completion
+    await asyncio.gather(gen_task, train_task)
     logger.info("Press Ctrl+C to stop...")
 
 
