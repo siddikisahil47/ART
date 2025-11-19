@@ -222,8 +222,6 @@ class LocalBackend(Backend):
             )
         )
         if not tokenized_results:
-            logger.warning("No tokenized_results")
-            logger.warning(f"example group: {trajectory_groups[0]}")
             return None
         max_tokens = max(len(result.tokens) for result in tokenized_results)
         # Round up max_tokens to the nearest multiple of 2048
