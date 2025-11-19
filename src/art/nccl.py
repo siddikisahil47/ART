@@ -171,11 +171,13 @@ class NCCLBroadcastSender:
 
     @torch.no_grad()
     def broadcast_state_dict(self, model: torch.nn.Module) -> None:
-        self.logger.debug("Broadcasting weights to inference pool")
+        self.logger.info("Broadcasting weights to inference pool")
 
         state_dict = model.state_dict()
+        self.logger.debug(f"State dict keys: {state_dict.keys()}")
         #
         num_layers = get_max_layer_num(state_dict)
+        self.logger.info(f"Number of layers: {num_layers}")
 
         num_state_dict_to_send = (
             num_layers + 1
@@ -184,7 +186,7 @@ class NCCLBroadcastSender:
         if self.training_rank == 0:
             send_integer(num_state_dict_to_send, self.pg)
 
-        self.logger.debug(f"Broadcasting {num_state_dict_to_send} layer state dicts")
+        self.logger.info(f"Broadcasting {num_state_dict_to_send} layer state dicts")
 
         for i, state_dict in filter_state_dict_by_layers(state_dict, num_layers):
             self.logger.debug(f"Sending layer {i}/{num_state_dict_to_send} state dict")
