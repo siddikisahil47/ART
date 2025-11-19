@@ -215,6 +215,7 @@ class AsyncService:
 
         # Initialize broadcaster
         await self._init_broadcaster(server_args)
+        await self._update_weights_via_nccl()
 
     async def _wait_for_vllm_ready(self, base_url: str, api_key: str) -> None:
         """
@@ -428,12 +429,53 @@ class AsyncService:
         if verbose:
             print("Setting new LoRA adapter...")
         # Set the new LoRA adapter
-        await self._set_lora(checkpoint_dir)
+        await self._update_weights_via_nccl()
         if verbose:
             print("New LoRA adapter set")
 
         if verbose:
             print("ModelService.train complete")
+
+    async def _update_weights_via_nccl(self) -> None:
+        """Triggers the weight update on the vLLM engine via NCCL."""
+        # Note: The /update_weights endpoint is on the root, not under /v1
+        if not self.nccl_broadcast:
+            logger.warning("NCCL broadcaster not initialized")
+            raise RuntimeError
+
+        logger.info("Merging and unloading PEFT model...")
+        merged_model = self.state.peft_model.merge_and_unload()
+
+        async def _broadcast():
+            logger.info("Broadcasting state dict...")
+            await asyncio.to_thread(
+                self.nccl_broadcast.broadcast_state_dict, merged_model
+            )
+
+        async def _trigger():
+            # Wait a bit to ensure the broadcaster is ready/started before we tell the server to receive
+            # Although asyncio.gather starts them "concurrently", the broadcast operation is heavy
+            # and we want to make sure we don't timeout the HTTP request if the broadcast takes long to prep?
+            # Actually, the server will block on receive_state_dict immediately upon receiving the request.
+            # The sender (us) will block on broadcast_state_dict.
+            # We just need both to happen.
+            base_url = "http://localhost:8000"
+            logger.info("Triggering inference server update...")
+            # We might need a slight delay or just rely on the fact that broadcast_state_dict takes time to setup?
+            # Ideally we just fire both.
+            await asyncio.sleep(0.1)  # Small yield to ensure broadcast thread starts
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(
+                    f"{base_url}/update_weights",
+                )
+                response.raise_for_status()
+                logger.info(
+                    f"[ASYNC_SERVICE] DEBUG: State dict update triggered successfully"
+                )
+
+        await asyncio.gather(_broadcast(), _trigger())
+
+        del merged_model
 
     async def _update_lora_weights_via_nccl(self) -> None:
         """Triggers the weight update on the vLLM engine via NCCL."""
@@ -471,20 +513,28 @@ class AsyncService:
         logger.info(
             f"[ASYNC_SERVICE] DEBUG: Broadcasting LoRA adapter weights keys: {self.state.peft_model.state_dict().keys()}"
         )
-        self.nccl_broadcast.broadcast_lora(
-            self.state.peft_model, peft_config=filtered_config
-        )
 
-        logger.info("Triggering inference server update...")
-        base_url = "http://localhost:8000"
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(
-                f"{base_url}/update_lora_weights",
+        async def _broadcast():
+            await asyncio.to_thread(
+                self.nccl_broadcast.broadcast_lora,
+                self.state.peft_model,
+                peft_config=filtered_config,
             )
-            response.raise_for_status()
-            logger.info(
-                f"[ASYNC_SERVICE] DEBUG: LoRA adapter update triggered successfully"
-            )
+
+        async def _trigger():
+            logger.info("Triggering inference server update...")
+            base_url = "http://localhost:8000"
+            await asyncio.sleep(0.1)
+            async with httpx.AsyncClient(timeout=300) as client:
+                response = await client.post(
+                    f"{base_url}/update_lora_weights",
+                )
+                response.raise_for_status()
+                logger.info(
+                    f"[ASYNC_SERVICE] DEBUG: LoRA adapter update triggered successfully"
+                )
+
+        await asyncio.gather(_broadcast(), _trigger())
 
     async def _set_lora(self, lora_path: str) -> None:
         """Sets the LoRA adapter with ID 1 in the vLLM engine."""
