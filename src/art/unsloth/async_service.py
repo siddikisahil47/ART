@@ -207,6 +207,8 @@ class AsyncService:
         logger.info(
             f"[PIPELINE_RL_SERVICE] vLLM process started (PID: {self._vllm_process.pid})"
         )
+        # start loading unsloth
+        _ = self.state
         server_config = config or dev.OpenAIServerConfig()
         server_args = server_config.get("server_args", {})
         base_url = f"http://{server_args.get('host', '0.0.0.0')}:{server_args.get('port', 8000)}/v1"
