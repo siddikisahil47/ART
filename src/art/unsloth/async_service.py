@@ -48,6 +48,16 @@ class TrainInputs(PackedTensors):
 
 
 @dataclass
+class StateDictWrapper:
+    """Wrapper for a state dict to behave like a model for broadcasting."""
+
+    _state_dict: dict[str, torch.Tensor]
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return self._state_dict
+
+
+@dataclass
 class AsyncState:
     model: CausalLM
     tokenizer: PreTrainedTokenizerBase
@@ -446,39 +456,65 @@ class AsyncService:
             logger.warning("NCCL broadcaster not initialized")
             raise RuntimeError
 
-        logger.info("Merging and unloading PEFT model...")
-        merged_model = self.state.peft_model.merge_and_unload()
+        logger.info("Merging adapter temporarily for broadcasting...")
 
-        async def _broadcast():
-            logger.info("Broadcasting state dict...")
-            await asyncio.to_thread(
-                self.nccl_broadcast.broadcast_state_dict, merged_model
+        merged_wrapper = None
+        try:
+            # Merge adapters into base model weights
+            self.state.peft_model.merge_adapter()
+
+            # Extract state dict from base model
+            # We need to access the underlying model which has the merged weights
+            state_dict = self.state.peft_model.base_model.model.state_dict()
+
+            # Filter out lora keys if any remain (usually merge_adapter merges them into the weights)
+            # but we want to be sure we are sending clean weights
+            logger.info(
+                f"[ASYNC_SERVICE] DEBUG: State dict number of keys: {len(state_dict.keys())}"
             )
+            clean_state_dict = {k: v for k, v in state_dict.items() if "lora_" not in k}
+            logger.info(
+                f"[ASYNC_SERVICE] DEBUG: Clean state dict number of keys: {len(clean_state_dict.keys())}"
+            )
+            merged_wrapper = StateDictWrapper(clean_state_dict)
 
-        async def _trigger():
-            # Wait a bit to ensure the broadcaster is ready/started before we tell the server to receive
-            # Although asyncio.gather starts them "concurrently", the broadcast operation is heavy
-            # and we want to make sure we don't timeout the HTTP request if the broadcast takes long to prep?
-            # Actually, the server will block on receive_state_dict immediately upon receiving the request.
-            # The sender (us) will block on broadcast_state_dict.
-            # We just need both to happen.
-            base_url = "http://localhost:8000"
-            logger.info("Triggering inference server update...")
-            # We might need a slight delay or just rely on the fact that broadcast_state_dict takes time to setup?
-            # Ideally we just fire both.
-            await asyncio.sleep(0.1)  # Small yield to ensure broadcast thread starts
-            async with httpx.AsyncClient(timeout=300) as client:
-                response = await client.post(
-                    f"{base_url}/update_weights",
-                )
-                response.raise_for_status()
-                logger.info(
-                    f"[ASYNC_SERVICE] DEBUG: State dict update triggered successfully"
-                )
+            async def _broadcast():
+                logger.info("Broadcasting state dict...")
+                if merged_wrapper:
+                    await asyncio.to_thread(
+                        self.nccl_broadcast.broadcast_state_dict, merged_wrapper
+                    )
 
-        await asyncio.gather(_broadcast(), _trigger())
+            async def _trigger():
+                # Wait a bit to ensure the broadcaster is ready/started before we tell the server to receive
+                # Although asyncio.gather starts them "concurrently", the broadcast operation is heavy
+                # and we want to make sure we don't timeout the HTTP request if the broadcast takes long to prep?
+                # Actually, the server will block on receive_state_dict immediately upon receiving the request.
+                # The sender (us) will block on broadcast_state_dict.
+                # We just need both to happen.
+                base_url = "http://localhost:8000"
+                logger.info("Triggering inference server update...")
+                # We might need a slight delay or just rely on the fact that broadcast_state_dict takes time to setup?
+                # Ideally we just fire both.
+                await asyncio.sleep(
+                    0.1
+                )  # Small yield to ensure broadcast thread starts
+                async with httpx.AsyncClient(timeout=300) as client:
+                    response = await client.post(
+                        f"{base_url}/update_weights",
+                    )
+                    response.raise_for_status()
+                    logger.info(
+                        f"[ASYNC_SERVICE] DEBUG: State dict update triggered successfully"
+                    )
 
-        del merged_model
+            await asyncio.gather(_broadcast(), _trigger())
+
+        finally:
+            logger.info("Unmerging adapter to restore training state...")
+            self.state.peft_model.unmerge_adapter()
+            # Clean up memory
+            del merged_wrapper
 
     async def _update_lora_weights_via_nccl(self) -> None:
         """Triggers the weight update on the vLLM engine via NCCL."""
