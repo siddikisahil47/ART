@@ -180,6 +180,48 @@ class NCCLBroadcastSender:
 
         self.logger.info("Weights broadcasted to inference pool")
 
+    @torch.no_grad()
+    def broadcast_lora(
+        self, model: torch.nn.Module, peft_config: dict | None = None
+    ) -> None:
+        self.logger.debug("Broadcasting LoRA weights to inference pool")
+
+        lora_tensors = {}
+        # Extract LoRA tensors from state dict
+        for key, value in model.state_dict().items():
+            if "lora" in key:
+                if isinstance(value, DTensor):
+                    value = value.to(self.dtype).full_tensor()
+
+                # Remove '.default' from the key if present, as vLLM doesn't expect it
+                # e.g. base_model.model.model.layers.0.self_attn.q_proj.lora_A.default.weight
+                # -> base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight
+                clean_key = key.replace(".default", "")
+                lora_tensors[clean_key] = value
+
+        self.logger.info(f"Found {len(lora_tensors)} LoRA tensors to broadcast")
+
+        if self.training_rank == 0:
+            # Send config if provided
+            if peft_config is not None:
+                config_bytes = pickle.dumps(peft_config)
+                size_tensor = torch.tensor([len(config_bytes)], dtype=torch.long).cuda()
+                self.pg.broadcast(size_tensor, src=0)
+                config_tensor = torch.tensor(
+                    list(config_bytes), dtype=torch.uint8
+                ).cuda()
+                self.pg.broadcast(config_tensor, src=0)
+            else:
+                # Send 0 size to indicate no config
+                size_tensor = torch.tensor([0], dtype=torch.long).cuda()
+                self.pg.broadcast(size_tensor, src=0)
+
+            # Send 1 as number of chunks (we send all at once since LoRA is small)
+            send_integer(1, self.pg)
+            send_state_dict(lora_tensors, self.pg)
+
+        self.logger.info("LoRA weights broadcasted to inference pool")
+
 
 class NCCLBroadcastReceiver:
     def __init__(
@@ -210,3 +252,24 @@ class NCCLBroadcastReceiver:
             )
             for key, value in receive_state_dict(self.pg):
                 yield key, value
+
+    @torch.no_grad()
+    def receive_lora_dict(self) -> tuple[dict[str, torch.Tensor], dict | None]:
+        """Receive all LoRA tensors and return as a dictionary, along with optional config."""
+
+        # Receive config first
+        size_tensor = torch.tensor([0], dtype=torch.long).to(self.device)
+        self.pg.broadcast(size_tensor, src=0)
+        config_size = size_tensor.item()
+
+        peft_config = None
+        if config_size > 0:
+            config_tensor = torch.empty(config_size, dtype=torch.uint8).to(self.device)
+            self.pg.broadcast(config_tensor, src=0)
+            peft_config = pickle.loads(bytes(config_tensor.cpu().numpy()))
+
+        tensors = {}
+        for key, value in self.receive_state_dict():
+            tensors[key] = value
+
+        return tensors, peft_config
