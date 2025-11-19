@@ -76,8 +76,16 @@ async def run_custom_server_worker(listen_address, sock, args, client_config=Non
 
         @app.post("/update_weights")
         async def _update_weights(request: Request):
-            data = await request.json()
-            await engine_client.collective_rpc("update_weights", args=(data.get("weight_dir"),))
+            await engine_client.collective_rpc(
+                "update_weights",
+            )
+            return {"status": "ok"}
+
+        @app.post("/update_lora_weights")
+        async def _update_lora_weights(request: Request):
+            await engine_client.collective_rpc(
+                "update_lora_weights",
+            )
             return {"status": "ok"}
 
         vllm_config = await engine_client.get_vllm_config()

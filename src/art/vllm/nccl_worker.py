@@ -63,3 +63,48 @@ class NCCLWeightUpdateWorker(Worker):
         device = next(model.parameters()).device
         process_weights_after_loading(model, self.model_runner.model_config, device)
 
+    def update_lora_weights(self) -> None:
+        """Update LoRA weights with the nccl communicator."""
+        import torch
+        from vllm.lora.models import LoRAModel
+        from vllm.lora.peft_helper import PEFTHelper
+
+        logger = init_logger("vllm.inference.vllm.worker_nccl")
+
+        tensors, peft_config_dict = self.nccl_broadcast.receive_lora_dict()
+
+        if peft_config_dict is None:
+            # Fallback to existing config if not provided (risky if it changed)
+            logger.warning(
+                "No PEFT config received, using worker's default LoRA config"
+            )
+            # This might fail if lora_config is the global config, but we try our best
+            peft_helper = PEFTHelper.from_dict(self.model_runner.lora_config.__dict__)
+        else:
+            peft_helper = PEFTHelper.from_dict(peft_config_dict)
+
+        logger.info(f"[NCCL_WORKER] DEBUG: Tensors keys: {tensors.keys()}")
+
+        lora_id = 1
+
+        # Create LoRAModel from tensors
+        lora_model = LoRAModel.from_lora_tensors(
+            lora_model_id=lora_id,
+            tensors=tensors,
+            peft_helper=peft_helper,
+            device=self.device,
+            dtype=list(tensors.values())[0].dtype if tensors else torch.bfloat16,
+            # even though our LoRA weights are not applied on embeddings, we provide these because of the assertion in from_lora_tensors
+            # https://github.com/vllm-project/vllm/blob/01efc7ef781391e744ed08c3292817a773d654e6/vllm/lora/models.py#L160
+            # TODO: maybe this can be gotten from lora_manager.embeddings_modules or lora_manager.embedding_padding_modules
+            embedding_modules={
+                "embed_tokens": "input_embeddings",
+                "lm_head": "output_embeddings",
+            },
+            embedding_padding_modules=["lm_head"],
+        )
+
+        # Update the adapter in the LoRA manager
+        lora_manager = self.model_runner.lora_manager
+
+        # TODO: how to actually apply LoRA weights into model_runner?
