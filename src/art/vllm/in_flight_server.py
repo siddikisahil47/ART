@@ -40,7 +40,9 @@ async def run_custom_server(args, **uvicorn_kwargs) -> None:
 
 
 # copied from vllm/entrypoints/openai/api_server.py
-async def run_custom_server_worker(listen_address, sock, args, client_config=None, **uvicorn_kwargs) -> None:
+async def run_custom_server_worker(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -157,7 +159,9 @@ async def build_custom_async_engine_client(
 
 # copied from vllm/entrypoints/cli/serve.py
 def server():
-    parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible RESTful API server.")
+    parser = FlexibleArgumentParser(
+        description="vLLM OpenAI-Compatible RESTful API server."
+    )
     parser = make_arg_parser(parser)
     args = parser.parse_args()
     assert args is not None

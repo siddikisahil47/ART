@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
 import httpx
+import unsloth
 import peft
 import torch
-import unsloth
 from datasets import Dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.utils.dummy_pt_objects import GenerationMixin, PreTrainedModel
@@ -77,7 +77,6 @@ class AsyncService:
         else:
             init_args["model_name"] = self.base_model
 
-
         # NOTE: We have to patch empty_cache with a no-op during model initialization
         # to avoid an allocator error.
         empty_cache = torch.cuda.empty_cache
@@ -90,7 +89,9 @@ class AsyncService:
             engine_args: AsyncEngineArgs, *args: Any, **kwargs: Any
         ) -> AsyncLLMEngine:
             return from_engine_args(
-                replace(engine_args, **self.config.get("engine_args", {})), *args, **kwargs
+                replace(engine_args, **self.config.get("engine_args", {})),
+                *args,
+                **kwargs,
             )
 
         AsyncLLMEngine.from_engine_args = _from_engine_args

@@ -1,8 +1,11 @@
 from typing import TYPE_CHECKING
 
+import torch
 from torch.nn import Module
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
+from vllm.lora.models import LoRAModel
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -25,7 +28,14 @@ class NCCLWeightUpdateWorker(Worker):
     This is an vLLM worker extension for updating weights to an updated RL policy model using NCCL.
     """
 
-    def init_broadcaster(self, host: str, port: int, server_rank: int, num_inference_server: int, timeout: int) -> None:
+    def init_broadcaster(
+        self,
+        host: str,
+        port: int,
+        server_rank: int,
+        num_inference_server: int,
+        timeout: int,
+    ) -> None:
         """Initialize the process group for NCCL broadcast."""
         logger = init_logger("vllm.inference.vllm.worker_nccl")
         self.tp_rank = get_tp_group().rank
@@ -39,12 +49,16 @@ class NCCLWeightUpdateWorker(Worker):
         logger.info(
             f"Worker [tp={tp_rank} server_rank={server_rank}] -> [global_rank={global_rank_inference} global_world_size={global_inference_world_size}]"
         )
+        logger.info(
+            f"Model state dict keys: {self.model_runner.model.state_dict().keys()}"
+        )
 
         self.nccl_broadcast = NCCLBroadcastReceiver(
             host=host,
             port=port,
             rank=global_rank_inference + 1,  # +1 as the trainer broadcaster is rank 0
-            world_size=global_inference_world_size + 1,  # +1 for the trainer broadcaster
+            world_size=global_inference_world_size
+            + 1,  # +1 for the trainer broadcaster
             device=self.device,
             logger=logger,
             timeout=timeout,
@@ -65,10 +79,6 @@ class NCCLWeightUpdateWorker(Worker):
 
     def update_lora_weights(self) -> None:
         """Update LoRA weights with the nccl communicator."""
-        import torch
-        from vllm.lora.models import LoRAModel
-        from vllm.lora.peft_helper import PEFTHelper
-
         logger = init_logger("vllm.inference.vllm.worker_nccl")
 
         tensors, peft_config_dict = self.nccl_broadcast.receive_lora_dict()

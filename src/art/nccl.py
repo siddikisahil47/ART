@@ -10,14 +10,22 @@ from vllm.distributed.utils import StatelessProcessGroup
 logger = logging.getLogger(__name__)
 
 
-def stateless_init_process_group(master_address, master_port, rank, world_size, device, timeout):
+def stateless_init_process_group(
+    master_address, master_port, rank, world_size, device, timeout
+):
     pg = StatelessProcessGroup.create(
-        host=master_address, port=master_port, rank=rank, world_size=world_size, store_timeout=timeout
+        host=master_address,
+        port=master_port,
+        rank=rank,
+        world_size=world_size,
+        store_timeout=timeout,
     )
     return PyNcclCommunicator(pg, device=device)
 
 
-def send_state_dict(state_dict: dict[str, torch.Tensor], pg: PyNcclCommunicator) -> None:
+def send_state_dict(
+    state_dict: dict[str, torch.Tensor], pg: PyNcclCommunicator
+) -> None:
     """
     Get a state dict of tensor and broadcast it to the other ranks using NCCL.
     """
@@ -111,7 +119,10 @@ def filter_state_dict_by_layers(
     Yield a generator of state dicts for each layer as well as the remaining weights.
     """
 
-    yield 0, {key: value for key, value in state_dict.items() if "model.layers" not in key}
+    yield (
+        0,
+        {key: value for key, value in state_dict.items() if "model.layers" not in key},
+    )
 
     for i in range(1, num_layers + 1):  # +1 because layer indices start from 1
         yield (
@@ -126,7 +137,9 @@ def filter_state_dict_by_layers(
 
 def get_max_layer_num(state_dict: dict[str, torch.Tensor]) -> int:
     """Get the maximum number of layers in the model."""
-    return max(int(i.split(".")[2]) for i in state_dict.keys() if "model.layers." in i) + 1
+    return (
+        max(int(i.split(".")[2]) for i in state_dict.keys() if "model.layers." in i) + 1
+    )
 
 
 class NCCLBroadcastSender:
@@ -146,8 +159,12 @@ class NCCLBroadcastSender:
         self.training_rank = 0
 
         if self.training_rank == 0:
-            self.pg = stateless_init_process_group(host, port, rank, world_size, device, timeout)
-            self.logger.info(f"NCCL broadcast initialized for rank {rank} and world size {world_size}")
+            self.pg = stateless_init_process_group(
+                host, port, rank, world_size, device, timeout
+            )
+            self.logger.info(
+                f"NCCL broadcast initialized for rank {rank} and world size {world_size}"
+            )
 
         self.device = device
         self.dtype = dtype
@@ -160,7 +177,9 @@ class NCCLBroadcastSender:
         #
         num_layers = get_max_layer_num(state_dict)
 
-        num_state_dict_to_send = num_layers + 1  # we send all layer plus the remaining weights
+        num_state_dict_to_send = (
+            num_layers + 1
+        )  # we send all layer plus the remaining weights
 
         if self.training_rank == 0:
             send_integer(num_state_dict_to_send, self.pg)
@@ -236,8 +255,12 @@ class NCCLBroadcastReceiver:
     ):
         self.logger = logger
 
-        self.logger.info(f"Initializing NCCL broadcast receiver ({host}:{port}, rank={rank}, world_size={world_size})")
-        self.pg = stateless_init_process_group(host, port, rank, world_size, device, timeout)
+        self.logger.info(
+            f"Initializing NCCL broadcast receiver ({host}:{port}, rank={rank}, world_size={world_size})"
+        )
+        self.pg = stateless_init_process_group(
+            host, port, rank, world_size, device, timeout
+        )
 
         self.device = self.pg.device
 
