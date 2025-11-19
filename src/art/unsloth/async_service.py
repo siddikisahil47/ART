@@ -95,7 +95,8 @@ class AsyncService:
             )
 
         AsyncLLMEngine.from_engine_args = _from_engine_args
-
+        init_args["load_in_4bit"] = False
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Init args: {init_args}")
         model, tokenizer = cast(
             tuple[CausalLM, PreTrainedTokenizerBase],
             unsloth.FastLanguageModel.from_pretrained(**init_args),
