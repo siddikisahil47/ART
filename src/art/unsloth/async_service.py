@@ -432,6 +432,57 @@ class AsyncService:
         if verbose:
             print("ModelService.train complete")
 
+    async def _update_lora_weights_via_nccl(self) -> None:
+        """Triggers the weight update on the vLLM engine via NCCL."""
+        # Note: The /update_weights endpoint is on the root, not under /v1
+        if not self.nccl_broadcast:
+            logger.warning("NCCL broadcaster not initialized")
+            raise RuntimeError
+
+        # Extract PEFT config
+        logger.info(
+            f"[ASYNC_SERVICE] DEBUG: Peft config: {self.state.peft_model.peft_config}"
+        )
+        peft_config = self.state.peft_model.peft_config["default"]
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Peft config (default): {peft_config}")
+        # Convert to dict if it's an object, or use it directly
+        config_dict = (
+            peft_config.to_dict() if hasattr(peft_config, "to_dict") else peft_config
+        )
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Peft config (dict): {config_dict}")
+        # Filter for relevant fields for PEFTHelper
+        # r, lora_alpha, target_modules, bias, modules_to_save, use_rslora, use_dora
+        relevant_keys = [
+            "r",
+            "lora_alpha",
+            "target_modules",
+            "bias",
+            "modules_to_save",
+            "use_rslora",
+            "use_dora",
+        ]
+        filtered_config = {
+            k: config_dict.get(k) for k in relevant_keys if k in config_dict
+        }
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Filtered config: {filtered_config}")
+        logger.info(
+            f"[ASYNC_SERVICE] DEBUG: Broadcasting LoRA adapter weights keys: {self.state.peft_model.state_dict().keys()}"
+        )
+        self.nccl_broadcast.broadcast_lora(
+            self.state.peft_model, peft_config=filtered_config
+        )
+
+        logger.info("Triggering inference server update...")
+        base_url = "http://localhost:8000"
+        async with httpx.AsyncClient(timeout=300) as client:
+            response = await client.post(
+                f"{base_url}/update_lora_weights",
+            )
+            response.raise_for_status()
+            logger.info(
+                f"[ASYNC_SERVICE] DEBUG: LoRA adapter update triggered successfully"
+            )
+
     async def _set_lora(self, lora_path: str) -> None:
         """Sets the LoRA adapter with ID 1 in the vLLM engine."""
         logger.info(f"[ASYNC_SERVICE] DEBUG: Setting LoRA adapter: {lora_path}")
@@ -458,4 +509,4 @@ class AsyncService:
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             response.raise_for_status()
-            logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter loaded successfully") 
+            logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter loaded successfully")
