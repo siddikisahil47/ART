@@ -174,8 +174,9 @@ class AsyncService:
             # lora_path=lora_path,
             config=config,
         )
-        # engine_args = {**config.get("engine_args", {}), "enable_lora": True}
-        engine_args = {**config.get("engine_args", {})}
+        # even if we are not using LoRA in vLLM, we need to enable so that the
+        # tensor names will be the same
+        engine_args = {**config.get("engine_args", {}), "enable_lora": True}
         logger.info(f"[ASYNC_SERVICE]  engine_args: {engine_args}")
         server_args = config.get("server_args", {})
         logger.info(f"[ASYNC_SERVICE]  server_args: {server_args}")
