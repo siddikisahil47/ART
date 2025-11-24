@@ -27,6 +27,7 @@ import string
 import xml.etree.ElementTree as ET
 from typing import Literal
 
+from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
@@ -311,6 +312,7 @@ async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
 async def main(
     num_steps: int, rollouts_per_group: int, groups_per_step: int, sleep_per_step: int
 ):
+    load_dotenv()
     logger.info("=" * 80)
     logger.info("2048 Game with AsyncService")
     logger.info("=" * 80)
