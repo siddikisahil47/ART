@@ -508,8 +508,8 @@ async def main(
                         _config=art.dev.TrainConfig(),
                     )
 
-                    training_step += 1
                     logger.info(f"[TRAINING] Completed training step {training_step}")
+                    training_step += 1
 
                     # Mark all items as done
                     for _ in range(len(batch_buffer)):
