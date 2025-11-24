@@ -21,6 +21,7 @@ import string
 import xml.etree.ElementTree as ET
 from typing import Literal
 
+import numpy as np
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel
@@ -302,6 +303,14 @@ async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
 
     return trajectory
 
+def calculate_group_std_dev(trajectory_group: TrajectoryGroup) -> float:
+    rewards = [t.reward for t in trajectory_group.trajectories]
+
+    if len(rewards) > 1:
+        return np.std(rewards)
+    else:
+        return 0
+
 
 async def main(
     num_steps: int,
@@ -324,7 +333,7 @@ async def main(
     # Declare the model
     logger.info("[1] Creating TrainableModel with AsyncService configuration...")
     model = art.TrainableModel(
-        name="agent-001",
+        name="agent-002",
         project="pipeline-rl-test",
         base_model="OpenPipe/Qwen3-14B-Instruct",
         _internal_config=InternalModelConfig(
@@ -476,7 +485,15 @@ async def main(
                 logger.info("[TRAINING] Received end signal")
                 break
 
-            batch_buffer.append(trajectory_group)
+            if calculate_group_std_dev(trajectory_group) != 0:
+                batch_buffer.append(trajectory_group)
+                logger.info(
+                    f"[TRAINING]: Group received {len(batch_buffer)}/{groups_per_step} received"
+                )
+            else:
+                logger.info(
+                    f"[TRAINING]: Group received but skipped (reward stdev = 0) {len(batch_buffer)}/{groups_per_step} received"
+                )
 
             if len(batch_buffer) >= groups_per_step:
                 logger.info(f"[TRAINING] Starting training step {training_step}")
