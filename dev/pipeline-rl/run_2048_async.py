@@ -1,20 +1,14 @@
 """
-2048 Game with PipelineRL Concurrent Training
+2048 Game with PipelineRL Async Training
 
-This script demonstrates using PipelineRL's concurrent pipeline for the 2048 game task.
-
-Key differences from baseline:
-- Uses concurrent generation and training (not sequential)
-- vLLM runs continuously while training happens
-- LoRA weights are swapped after each training step
-- Expected ~1.5-2x throughput improvement
+- Implements continous batching
 
 Requirements:
 - 2 GPU machine (GPU 0 for vLLM, GPU 1 for training)
 - CUDA_VISIBLE_DEVICES=0,1
 
 Usage:
-    CUDA_VISIBLE_DEVICES=0,1 uv run python dev/pipeline-rl/run_2048_pipeline.py
+    CUDA_VISIBLE_DEVICES=0,1 uv run python dev/pipeline-rl/run_2048_async.py
 """
 
 import argparse
@@ -310,7 +304,10 @@ async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
 
 
 async def main(
-    num_steps: int, rollouts_per_group: int, groups_per_step: int, sleep_per_step: int
+    num_steps: int,
+    rollouts_per_group: int,
+    groups_per_step: int,
+    max_concurrent_rollouts: int,
 ):
     load_dotenv()
     logger.info("=" * 80)
@@ -374,40 +371,91 @@ async def main(
     logger.info("")
     logger.info("Verify with: nvidia-smi")
     logger.info("")
-    logger.info(f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}")
+    logger.info(
+        f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}, max_concurrent_rollouts={max_concurrent_rollouts}"
+    )
 
     trajectory_queue = asyncio.Queue(maxsize=50)
     metrics_queue = asyncio.Queue()
 
     # Generation task
     async def generation_task():
-        for step in range(num_steps):
-            logger.info(f"[GENERATION] Starting generation step {step}")
+        active_rollouts: set[asyncio.Task] = set()
 
-            try:
-                # Generate 2048 game trajectories using standard ART pattern
-                trajectory_groups = await art.gather_trajectory_groups(
-                    (
-                        art.TrajectoryGroup(
-                            rollout(model, Scenario2048(step=step))
-                            for _ in range(rollouts_per_group)
-                        )
-                        for i in range(groups_per_step)
-                    ),
-                    pbar_desc=f"generate_step_{step}",
-                    max_exceptions=rollouts_per_group * groups_per_step,
+        # Buffer to reassemble groups: { group_id: [trajectory1, trajectory2, ...] }
+        group_buffer: dict[int, list[art.Trajectory]] = {}
+
+        total_groups_needed = num_steps * groups_per_step
+        total_rollouts_needed = total_groups_needed * rollouts_per_group
+
+        # We track progress by rollouts launched
+        rollouts_launched = 0
+
+        logger.info(f"[GENERATION] Starting pool of {max_concurrent_rollouts} rollouts")
+
+        while rollouts_launched < total_rollouts_needed or active_rollouts:
+            # 1. Refill the pool with individual rollouts
+            while (
+                len(active_rollouts) < max_concurrent_rollouts
+                and rollouts_launched < total_rollouts_needed
+            ):
+                # Calculate which group this rollout belongs to
+                # Group ID is global (0 to total_groups_needed-1)
+                current_group_id = rollouts_launched // rollouts_per_group
+                current_step_idx = current_group_id // groups_per_step
+
+                # Define a wrapper to attach metadata (group_id) to the task result
+                async def rollout_worker(gid, step):
+                    traj = await rollout(model, Scenario2048(step=step))
+                    return gid, traj
+
+                task = asyncio.create_task(
+                    rollout_worker(current_group_id, current_step_idx)
                 )
+                active_rollouts.add(task)
+                rollouts_launched += 1
 
+            if rollouts_launched % 50 == 0:  # Log every 50 rollouts
                 logger.info(
-                    f"[GENERATION] Putting {len(trajectory_groups)} groups in queue"
+                    f"[GENERATION] Progress: {rollouts_launched}/{total_rollouts_needed} "
+                    f"({len(active_rollouts)} active, {len(group_buffer)} partial groups)"
                 )
-                await trajectory_queue.put(trajectory_groups)
 
-                logger.info(f"[GENERATION] Completed generation step {step}")
+            # 2. Wait for FIRST rollout to finish
+            done, _ = await asyncio.wait(
+                active_rollouts, return_when=asyncio.FIRST_COMPLETED
+            )
 
-            except Exception as e:
-                logger.error(f"[GENERATION] Error in step {step}: {e}")
-                raise
+            for task in done:
+                active_rollouts.remove(task)
+                try:
+                    # Get result: (group_id, trajectory)
+                    gid, traj = await task
+
+                    # Add to buffer
+                    if gid not in group_buffer:
+                        group_buffer[gid] = []
+                    group_buffer[gid].append(traj)
+
+                    logger.info(
+                        f"[GENERATION] Group {gid} {len(group_buffer[gid])}/{rollouts_per_group} completed"
+                    )
+
+                    # Check if group is complete
+                    if len(group_buffer[gid]) == rollouts_per_group:
+                        # Create the TrajectoryGroup
+                        complete_group = art.TrajectoryGroup(group_buffer.pop(gid))
+                        logger.info(
+                            f"[GENERATION] Group {gid} completed, sending to trainer "
+                            f"(queue size: {trajectory_queue.qsize()})"
+                        )
+
+                        # Send to trainer
+                        await trajectory_queue.put(complete_group)
+
+                except Exception as e:
+                    logger.error(f"[GENERATION] Rollout failed: {e}")
+                    raise e
 
         # Signal end
         await trajectory_queue.put(None)
@@ -416,37 +464,44 @@ async def main(
     # Training task
     async def training_task():
         training_step = 0
+        batch_buffer = []
 
         while True:
             logger.info(
                 f"[TRAINING] Waiting for trajectories (queue size: {trajectory_queue.qsize()}/50)"
             )
-            trajectory_groups = await trajectory_queue.get()
+            trajectory_group = await trajectory_queue.get()
 
-            if trajectory_groups is None:
+            if trajectory_group is None:
                 logger.info("[TRAINING] Received end signal")
                 break
 
-            logger.info(f"[TRAINING] Starting training step {training_step}")
-            logger.info(
-                f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups"
-            )
+            batch_buffer.append(trajectory_group)
 
-            try:
-                await model.train(
-                    trajectory_groups,
-                    config=art.TrainConfig(),
-                    _config=art.dev.TrainConfig(),
+            if len(batch_buffer) >= groups_per_step:
+                logger.info(f"[TRAINING] Starting training step {training_step}")
+                logger.info(
+                    f"[TRAINING]   Received {len(batch_buffer)} trajectory groups"
                 )
 
-                training_step += 1
-                logger.info(f"[TRAINING] Completed training step {training_step}")
+                try:
+                    await model.train(
+                        batch_buffer,
+                        config=art.TrainConfig(),
+                        _config=art.dev.TrainConfig(),
+                    )
 
-                trajectory_queue.task_done()
+                    training_step += 1
+                    logger.info(f"[TRAINING] Completed training step {training_step}")
 
-            except Exception as e:
-                logger.error(f"[TRAINING] Error in step {training_step}: {e}")
-                raise
+                    # Mark all items as done
+                    for _ in range(len(batch_buffer)):
+                        trajectory_queue.task_done()
+                    batch_buffer = []
+
+                except Exception as e:
+                    logger.error(f"[TRAINING] Error in step {training_step}: {e}")
+                    raise
 
         # Signal end
         await metrics_queue.put(None)
@@ -496,12 +551,18 @@ if __name__ == "__main__":
         default=0,
         help="Amount of time (s) to wait between each step",
     )
+    parser.add_argument(
+        "--max-concurrent-rollouts",
+        type=int,
+        default=18,
+        help="Maximum concurrent rollouts",
+    )
     args = parser.parse_args()
     asyncio.run(
         main(
             args.num_steps,
             args.rollouts_per_group,
             args.groups_per_step,
-            args.sleep_per_step,
+            args.max_concurrent_rollouts,
         )
     )
