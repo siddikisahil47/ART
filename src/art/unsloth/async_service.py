@@ -164,8 +164,9 @@ class AsyncService:
         logger.info("[ASYNC_SERVICE] Starting vLLM with weight update support")
         logger.info(f"[ASYNC_SERVICE]  inference_gpu_ids: {inference_gpu_ids}")
 
-        vllm_server_script = "src/art/vllm/in_flight_server.py"
-        if not os.path.exists(vllm_server_script):
+        art_root = Path(__file__).parent.parent  # Go up from unsloth/ to art/
+        vllm_server_script = art_root / "vllm" / "in_flight_server.py"
+        if not vllm_server_script.exists():
             raise FileNotFoundError(
                 f"in_flight_server.py not found at {vllm_server_script}."
             )
