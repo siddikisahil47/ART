@@ -17,6 +17,15 @@ class Loss(BaseModel):
     mean_entropy: torch.Tensor | None
     policy_loss_sum: torch.Tensor
     probs_corr: torch.Tensor
+    # Async RL diagnostic metrics
+    importance_ratio_mean: float
+    importance_ratio_min: float
+    importance_ratio_max: float
+    importance_ratio_std: float
+    async_masked_fraction: float
+    async_masked_low_fraction: float
+    async_masked_high_fraction: float
+    async_mismatch_kl: float
 
 
 def loss_fn(
@@ -132,12 +141,63 @@ def loss_fn(
         )
     else:
         mean_entropy = None
+
+    # === Async RL Diagnostic Metrics ===
+    # Log importance ratio statistics to diagnose off-policy issues
+    with torch.no_grad():
+        # Only consider assistant tokens for metrics
+        assistant_prob_ratio = prob_ratio[assistant_mask > 0]
+        assistant_logprob_diff = logprob_diff[assistant_mask > 0]
+        if assistant_prob_ratio.numel() > 0:
+            importance_ratio_mean = assistant_prob_ratio.mean().item()
+            importance_ratio_min = assistant_prob_ratio.min().item()
+            importance_ratio_max = assistant_prob_ratio.max().item()
+            importance_ratio_std = assistant_prob_ratio.std().item()
+
+            # Count tokens with extreme ratios (would be masked)
+            MASK_RATIO_LOW = 0.125
+            MASK_RATIO_HIGH = 8.0
+            is_masked_low = assistant_prob_ratio < MASK_RATIO_LOW
+            is_masked_high = assistant_prob_ratio > MASK_RATIO_HIGH
+            is_masked = is_masked_low | is_masked_high
+            num_assistant_tokens = assistant_prob_ratio.numel()
+
+            async_masked_fraction = is_masked.sum().item() / num_assistant_tokens
+            async_masked_low_fraction = (
+                is_masked_low.sum().item() / num_assistant_tokens
+            )
+            async_masked_high_fraction = (
+                is_masked_high.sum().item() / num_assistant_tokens
+            )
+
+            # Mismatch KL: token-level divergence from inference policy
+            # Formula: exp(log_ratio) - log_ratio - 1
+            mismatch_kl = torch.exp(assistant_logprob_diff) - assistant_logprob_diff - 1
+            async_mismatch_kl = mismatch_kl.mean().item()
+        else:
+            importance_ratio_mean = 0.0
+            importance_ratio_min = 0.0
+            importance_ratio_max = 0.0
+            importance_ratio_std = 0.0
+            async_masked_fraction = 0.0
+            async_masked_low_fraction = 0.0
+            async_masked_high_fraction = 0.0
+            async_mismatch_kl = 0.0
+
     return Loss(
         mean_policy_loss=mean_policy_loss,
         mean_kl=mean_kl,
         mean_entropy=mean_entropy,
         policy_loss_sum=policy_loss.sum(),
         probs_corr=probs_corr,
+        importance_ratio_mean=importance_ratio_mean,
+        importance_ratio_min=importance_ratio_min,
+        importance_ratio_max=importance_ratio_max,
+        importance_ratio_std=importance_ratio_std,
+        async_masked_fraction=async_masked_fraction,
+        async_masked_low_fraction=async_masked_low_fraction,
+        async_masked_high_fraction=async_masked_high_fraction,
+        async_mismatch_kl=async_mismatch_kl,
     )
 
 

@@ -164,6 +164,31 @@ def get_compute_loss_fn(trainer: "GRPOTrainer") -> Callable[..., torch.Tensor]:
             _config,
         )
 
+        # === Async RL Diagnostic Metrics ===
+        # Log importance ratio statistics to diagnose off-policy issues
+        trainer._metrics["train"]["importance_ratio/mean"].append(
+            loss.importance_ratio_mean
+        )
+        trainer._metrics["train"]["importance_ratio/min"].append(
+            loss.importance_ratio_min
+        )
+        trainer._metrics["train"]["importance_ratio/max"].append(
+            loss.importance_ratio_max
+        )
+        trainer._metrics["train"]["importance_ratio/std"].append(
+            loss.importance_ratio_std
+        )
+        trainer._metrics["train"]["async/masked_fraction"].append(
+            loss.async_masked_fraction
+        )
+        trainer._metrics["train"]["async/masked_low_fraction"].append(
+            loss.async_masked_low_fraction
+        )
+        trainer._metrics["train"]["async/masked_high_fraction"].append(
+            loss.async_masked_high_fraction
+        )
+        trainer._metrics["train"]["async/mismatch_kl"].append(loss.async_mismatch_kl)
+
         trainer._metrics["train"]["learning_rate"].append(config.learning_rate)
         trainer._metrics["train"]["policy_loss"].append(loss.mean_policy_loss.item())
         if loss.mean_entropy is not None:
