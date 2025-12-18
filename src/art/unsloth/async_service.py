@@ -160,7 +160,7 @@ class AsyncService:
         )
 
     async def start_openai_server(self, config: dev.OpenAIServerConfig | None) -> None:
-        inference_gpu_ids = [1]
+        inference_gpu_ids = self.config.get("inference_gpu_ids", [1])
         logger.info("[ASYNC_SERVICE] Starting vLLM with weight update support")
         logger.info(f"[ASYNC_SERVICE]  inference_gpu_ids: {inference_gpu_ids}")
 
