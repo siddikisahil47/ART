@@ -603,3 +603,18 @@ class AsyncService:
             )
             response.raise_for_status()
             logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter loaded successfully")
+
+    def close(self) -> None:
+        vllm_process = getattr(self, "_vllm_process", None)
+        if vllm_process:
+            logger.info("[ASYNC_SERVICE] Terminating vLLM process...")
+            vllm_process.terminate()
+            try:
+                vllm_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "[ASYNC_SERVICE] vLLM process did not terminate, killing..."
+                )
+                vllm_process.kill()
+                vllm_process.wait()
+            logger.info("[ASYNC_SERVICE] vLLM process terminated")
