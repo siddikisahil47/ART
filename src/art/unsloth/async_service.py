@@ -77,6 +77,13 @@ class AsyncService:
     _train_task: asyncio.Task[None] | None = None
     nccl_broadcast: NCCLBroadcastSender | None = None
 
+    def __post_init__(self):
+        trainer_gpu_ids = self.config.get("trainer_gpu_ids", [0])
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, trainer_gpu_ids))
+        logger.info(
+            f"[ASYNC_SERVICE] Restricted main process to GPUs: {os.environ['CUDA_VISIBLE_DEVICES']}"
+        )
+
     @functools.cached_property
     def state(self) -> AsyncState:
         # Initialize Unsloth model
