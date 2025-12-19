@@ -4,8 +4,9 @@ Tests for PipelineRLService structure.
 These are lightweight structural tests (imports, dataclass fields, method existence).
 """
 
-import pytest
 from dataclasses import fields
+
+import pytest
 
 
 class TestPipelineRLServiceStructure:
@@ -19,8 +20,9 @@ class TestPipelineRLServiceStructure:
 
     def test_is_dataclass(self):
         """Test that PipelineRLService is a dataclass."""
-        from art.local.pipeline_rl_service import PipelineRLService
         from dataclasses import is_dataclass
+
+        from art.local.pipeline_rl_service import PipelineRLService
 
         assert is_dataclass(PipelineRLService)
 
@@ -41,7 +43,9 @@ class TestPipelineRLServiceStructure:
             "_train_task",
         }
 
-        assert required_fields.issubset(field_names), f"Missing fields: {required_fields - field_names}"
+        assert required_fields.issubset(field_names), (
+            f"Missing fields: {required_fields - field_names}"
+        )
 
     def test_can_instantiate(self):
         """Test that we can create an instance."""
@@ -82,8 +86,9 @@ class TestPipelineRLServiceStructure:
 
     def test_vllm_engine_is_sleeping_returns_false(self):
         """Test that vllm_engine_is_sleeping always returns False."""
-        from art.local.pipeline_rl_service import PipelineRLService
         import asyncio
+
+        from art.local.pipeline_rl_service import PipelineRLService
 
         service = PipelineRLService(
             model_name="test-model",
@@ -115,5 +120,8 @@ class TestPipelineRLServiceStructure:
 
         assert PipelineRLService.__doc__ is not None
         assert PipelineRLService.train.__doc__ is not None
-        assert PipelineRLService.start_openai_server_with_weight_updates.__doc__ is not None
+        assert (
+            PipelineRLService.start_openai_server_with_weight_updates.__doc__
+            is not None
+        )
         assert PipelineRLService.swap_lora_checkpoint.__doc__ is not None

@@ -185,6 +185,7 @@ def total_board_value(game: TwentyFortyEightGame) -> int:
 class Scenario2048(BaseModel):
     step: int
 
+
 @art.retry(exceptions=(requests.ReadTimeout))
 async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
     client = AsyncOpenAI(
@@ -268,7 +269,6 @@ async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
 
 
 async def main():
-
     load_dotenv()
 
     random.seed(42)
@@ -288,17 +288,20 @@ async def main():
     for i in range(await model.get_step(), 20):
         train_groups = await art.gather_trajectory_groups(
             (
-                art.TrajectoryGroup(rollout(model, Scenario2048(step=i)) for _ in range(18))
+                art.TrajectoryGroup(
+                    rollout(model, Scenario2048(step=i)) for _ in range(18)
+                )
                 for _ in range(1)
             ),
             pbar_desc="gather",
             max_exceptions=18,
         )
-        await model.delete_checkpoints('train/reward')
+        await model.delete_checkpoints("train/reward")
         await model.train(
             train_groups,
             config=art.TrainConfig(learning_rate=1e-5),
         )
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -31,8 +31,7 @@ if not root_logger.handlers:
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     formatter = logging.Formatter(
-        "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-        datefmt="%H:%M:%S"
+        "%(asctime)s | %(name)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"
     )
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
@@ -152,7 +151,9 @@ async def main(
     logger.info("")
     logger.info("Verify with: nvidia-smi")
     logger.info("")
-    logger.info(f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}")
+    logger.info(
+        f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}"
+    )
     logger.info("")
     for step in range(num_steps):
         sleep(sleep_per_step)
@@ -161,7 +162,9 @@ async def main(
         import string
 
         def random_string(length: int) -> str:
-            return "".join(random.choices(string.ascii_letters + string.digits, k=length))
+            return "".join(
+                random.choices(string.ascii_letters + string.digits, k=length)
+            )
 
         # Generate a list of long random input strings
         random_inputs = [random_string(64) for _ in range(groups_per_step)]
@@ -172,7 +175,8 @@ async def main(
                         rollout(
                             model,
                             TrainingScenario(
-                                step=step, data=ReverseStringScenario(input=random_inputs[i])
+                                step=step,
+                                data=ReverseStringScenario(input=random_inputs[i]),
                             ),
                         )
                         for _ in range(rollouts_per_group)
@@ -189,13 +193,14 @@ async def main(
         except Exception as e:
             logger.error(f"[GENERATION] Error in step {step}: {e}")
 
-
         logger.info(f"[TRAINING] Starting training step {step}")
-        logger.info(
-            f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups"
-        )
+        logger.info(f"[TRAINING]   Received {len(trajectory_groups)} trajectory groups")
         try:
-            await model.train(trajectory_groups, config=art.TrainConfig(), _config=art.dev.TrainConfig())
+            await model.train(
+                trajectory_groups,
+                config=art.TrainConfig(),
+                _config=art.dev.TrainConfig(),
+            )
         except Exception as e:
             logger.error(f"[TRAINING] Error in step {step}: {e}")
             raise

@@ -6,6 +6,8 @@ Based on PipelineRL
 import logging
 import os
 import signal
+
+# Import from ART's torch_utils (already copied to src/art/local/torch_utils.py)
 import sys
 import time
 from pathlib import Path
@@ -38,9 +40,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import AsyncMPClient
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-# Import from ART's torch_utils (already copied to src/art/local/torch_utils.py)
-import sys
-from pathlib import Path
 # Add ART src to path so we can import art.local.torch_utils
 art_src = Path(__file__).parent.parent.parent / "src"
 sys.path.insert(0, str(art_src))
@@ -126,10 +125,12 @@ class WorkerExtension:
         # Log all you know (matching PipelineRL's logging)
         prefix = "[INIT_ACTOR_UPDATE_GROUP]: "
         logger.info(
-            prefix + f"Actor index: {actor_idx}, actor ngpus: {actor_ngpus}, rank: {self.rank}, pg_rank: {self.pg_rank}"
+            prefix
+            + f"Actor index: {actor_idx}, actor ngpus: {actor_ngpus}, rank: {self.rank}, pg_rank: {self.pg_rank}"
         )
         logger.info(
-            prefix + f"Weight update group init method: {weight_update_group_init_method}, "
+            prefix
+            + f"Weight update group init method: {weight_update_group_init_method}, "
             f"world size: {weight_update_group_world_size}"
         )
 
@@ -154,20 +155,30 @@ class WorkerExtension:
         # Reconstruct WeightUpdateRequest from dict
         request = WeightUpdateRequest(**request_dict)
 
-        logger.info(f"[Worker {self.rank}] receive_weight_update called with request: {request}")
+        logger.info(
+            f"[Worker {self.rank}] receive_weight_update called with request: {request}"
+        )
         torch.cuda.synchronize(self.device)
         logger.info(f"[Worker {self.rank}] Start receiving weight update")
         for info in request.parameters_info:
             logger.info(f"[Worker {self.rank}] Update weight for {info.name}")
             model_dtype = self.model_config.dtype
-            assert info.dtype == str(model_dtype), f"mismatch dtype: src {info.dtype}, dst {self.model_config.dtype}"
+            assert info.dtype == str(model_dtype), (
+                f"mismatch dtype: src {info.dtype}, dst {self.model_config.dtype}"
+            )
             logger.info(f"[Worker {self.rank}] - weight types checked")
-            buffer = torch.empty(tuple(info.shape), dtype=model_dtype, device=self.device)
+            buffer = torch.empty(
+                tuple(info.shape), dtype=model_dtype, device=self.device
+            )
             logger.info(f"[Worker {self.rank}] - buffer created, about to broadcast...")
-            logger.info(f"[Worker {self.rank}] - process_group: {self.process_group}, pg_rank: {self.pg_rank}")
+            logger.info(
+                f"[Worker {self.rank}] - process_group: {self.process_group}, pg_rank: {self.pg_rank}"
+            )
             torch.distributed.broadcast(buffer, src=0, group=self.process_group)
             logger.info(f"[Worker {self.rank}] - buffer broadcasted")
-            loaded_params = self.model_runner.model.load_weights(weights=[(info.name, buffer)])  # type: ignore
+            loaded_params = self.model_runner.model.load_weights(
+                weights=[(info.name, buffer)]
+            )  # type: ignore
             logger.info("- weights loaded")
             if len(loaded_params) != 1:
                 raise ValueError(f"model {info.name} not found in model state dict")
@@ -211,7 +222,9 @@ class WeightUpdateManager:
         logger.info(f"Converted request to dict: {request_dict}")
 
         try:
-            result = await self.engine_client.collective_rpc_async("receive_weight_update", args=(request_dict,))
+            result = await self.engine_client.collective_rpc_async(
+                "receive_weight_update", args=(request_dict,)
+            )
             logger.info(f"collective_rpc_async returned: {result}")
         except Exception as e:
             logger.error(f"collective_rpc_async failed: {e}", exc_info=True)
@@ -250,11 +263,15 @@ def save_startup_script(args, script_path: Optional[Path] = None):
 
         # Add environment variables
         f.write("# Environment variables\n")
-        f.write(f"export CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')}\n")
+        f.write(
+            f"export CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '')}\n"
+        )
         f.write(f"export NCCL_CUMEM_ENABLE=0\n")
         f.write(f"export TORCH_DISABLE_SHARE_RDZV_TCP_STORE=1\n")
         f.write(f"export HF_DATASETS_DISABLE_PROGRESS_BARS=1\n")
-        f.write(f"export VLLM_LOGGING_LEVEL={os.environ.get('VLLM_LOGGING_LEVEL', 'INFO')}\n")
+        f.write(
+            f"export VLLM_LOGGING_LEVEL={os.environ.get('VLLM_LOGGING_LEVEL', 'INFO')}\n"
+        )
         f.write(f"export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1\n\n")
 
         # Add the command
@@ -438,9 +455,13 @@ def main():
     # Validate weight update arguments if weight updates are enabled
     if not args.disable_weight_updates:
         if not args.weight_update_group_init_method:
-            parser.error("--weight-update-group-init-method is required when weight updates are enabled")
+            parser.error(
+                "--weight-update-group-init-method is required when weight updates are enabled"
+            )
         if not args.weight_update_group_world_size:
-            parser.error("--weight-update-group-world-size is required when weight updates are enabled")
+            parser.error(
+                "--weight-update-group-world-size is required when weight updates are enabled"
+            )
 
     # Set up logging to file if specified (following PipelineRL pattern)
     if args.log_dir:
@@ -468,18 +489,26 @@ def main():
     logger.info(f"Starting vLLM server with weight update support")
     logger.info(f"Model: {args.model if hasattr(args, 'model') else 'not specified'}")
     logger.info(f"Port: {args.port if hasattr(args, 'port') else 'default'}")
-    logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+    logger.info(
+        f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}"
+    )
     logger.info(f"Number of GPUs available: {torch.cuda.device_count()}")
-    logger.info(f"Weight updates: {'DISABLED' if args.disable_weight_updates else 'ENABLED'}")
+    logger.info(
+        f"Weight updates: {'DISABLED' if args.disable_weight_updates else 'ENABLED'}"
+    )
 
     if not args.disable_weight_updates:
-        logger.info(f"Weight update init method: {args.weight_update_group_init_method}")
+        logger.info(
+            f"Weight update init method: {args.weight_update_group_init_method}"
+        )
         logger.info(f"Weight update world size: {args.weight_update_group_world_size}")
         logger.info(f"Actor LLM index: {args.actor_llm_idx}")
 
     # Dry run mode - just print config and exit
     if args.dry_run or os.environ.get("DRY_RUN", "0") == "1":
-        logger.info("DRY RUN MODE - Configuration validated, exiting without starting server")
+        logger.info(
+            "DRY RUN MODE - Configuration validated, exiting without starting server"
+        )
         print("\n=== Configuration Summary ===")
         for key, value in vars(args).items():
             print(f"  {key}: {value}")

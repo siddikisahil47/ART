@@ -22,16 +22,18 @@ import asyncio
 import logging
 
 import art
-from art import Trajectory, TrajectoryGroup, TrainableModel, TrainConfig
-from art.local import LocalBackend
+from art import TrainableModel, TrainConfig, Trajectory, TrajectoryGroup
 from art.dev import (
-    InternalModelConfig,
-    TrainConfig as DevTrainConfig,
     InitArgs,
+    InternalModelConfig,
+    OpenAIServerConfig,
     PeftArgs,
     TrainerArgs,
-    OpenAIServerConfig,
 )
+from art.dev import (
+    TrainConfig as DevTrainConfig,
+)
+from art.local import LocalBackend
 
 # Configure logging to show all output
 root_logger = logging.getLogger()
@@ -188,7 +190,7 @@ async def main():
     )
 
     dev_config = DevTrainConfig(
-        allow_training_without_logprobs=True, # there is no logprobs since we are using dummy trajactories
+        allow_training_without_logprobs=True,  # there is no logprobs since we are using dummy trajactories
     )
 
     # Configure GPU assignment

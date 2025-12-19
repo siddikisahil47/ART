@@ -182,7 +182,9 @@ async def main(
     logger.info("")
     logger.info("Verify with: nvidia-smi")
     logger.info("")
-    logger.info(f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}")
+    logger.info(
+        f"Configuration: num_steps={num_steps}, rollouts_per_group={rollouts_per_group}, groups_per_step={groups_per_step}"
+    )
     logger.info("")
     for step in range(num_steps):
         sleep(sleep_per_step)
