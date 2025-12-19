@@ -341,13 +341,14 @@ class LocalBackend(Backend):
         logger.info(f"[BACKEND]   API Key: {api_key}")
         logger.info("")
 
-        def done_callback(_: asyncio.Task[None]) -> None:
-            logger.info("OpenAI server Monitor done callback is called")
-            close_proxy(self._services.pop(model.name))
-
-        asyncio.create_task(
-            self._monitor_openai_server(model.name, base_url, api_key)
-        ).add_done_callback(done_callback)
+        # NOTE: Disabled, monitor seems to randomly cause shutdowns in async setting
+        # def done_callback(_: asyncio.Task[None]) -> None:
+        #     logger.info("OpenAI server Monitor done callback is called")
+        #     close_proxy(self._services.pop(model.name))
+        #
+        # asyncio.create_task(
+        #     self._monitor_openai_server(model.name, base_url, api_key)
+        # ).add_done_callback(done_callback)
 
         return base_url, api_key
 
