@@ -250,9 +250,9 @@ class AsyncService:
         start_time = time.time()
         while True:
             elapsed = time.time() - start_time
-            if elapsed > 120:
+            if elapsed > 180:
                 raise TimeoutError(
-                    f"vLLM server at {base_url} did not become ready within 120s."
+                    f"vLLM server at {base_url} did not become ready within 180s."
                 )
             try:
                 async for _ in client.models.list():
