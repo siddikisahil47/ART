@@ -449,7 +449,7 @@ class AsyncService:
         if verbose:
             print("Setting new LoRA adapter...")
         # Set the new LoRA adapter
-        await self._update_weights_via_nccl()
+        await self._load_lora_adapter(checkpoint_dir)
         if verbose:
             print("New LoRA adapter set")
 
@@ -582,29 +582,15 @@ class AsyncService:
 
         await asyncio.gather(_broadcast(), _trigger())
 
-    async def _set_lora(self, lora_path: str) -> None:
-        """Sets the LoRA adapter with ID 1 in the vLLM engine."""
-        logger.info(f"[ASYNC_SERVICE] DEBUG: Setting LoRA adapter: {lora_path}")
-        base_url = f"http://localhost:8000"
+    async def _load_lora_adapter(self, lora_path: str) -> None:
+        """Loads or refreshes the LoRA adapter by name in the vLLM server."""
+        base_url = "http://localhost:8000/v1"
         api_key = "default"
-        # unload the old LoRA adapter
+        logger.info(f"[ASYNC_SERVICE] DEBUG: Loading LoRA adapter: {lora_path}")
         async with httpx.AsyncClient(timeout=300) as client:
             response = await client.post(
-                f"{base_url}/v1/unload_lora_adapter",
-                json={"lora_name": self.model_name, "lora_int_id": 1},
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-            response.raise_for_status()
-            logger.info(f"[ASYNC_SERVICE] DEBUG: LoRA adapter unloaded successfully")
-        # load the new LoRA adapter
-        async with httpx.AsyncClient(timeout=300) as client:
-            response = await client.post(
-                f"{base_url}/v1/load_lora_adapter",
-                json={
-                    "lora_name": self.model_name,
-                    "lora_int_id": 1,
-                    "lora_path": lora_path,
-                },
+                f"{base_url}/load_lora_adapter",
+                json={"lora_name": self.model_name, "lora_path": lora_path},
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             response.raise_for_status()
