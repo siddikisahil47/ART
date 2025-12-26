@@ -189,7 +189,7 @@ class AsyncService:
             model_name=self.model_name,
             base_model=self.base_model,
             log_file=f"{self.output_dir}/logs/vllm.log",
-            # lora_path=lora_path,
+            lora_path=lora_path,
             config=config,
         )
         # even if we are not using LoRA in vLLM, we need to enable so that the
@@ -217,7 +217,7 @@ class AsyncService:
                 inference_cmd,
                 env={
                     **os.environ,
-                    # "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+                    "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
                     "CUDA_VISIBLE_DEVICES": ",".join(map(str, inference_gpu_ids)),
                 },
                 stdout=log_file,
@@ -236,7 +236,6 @@ class AsyncService:
 
         # Initialize broadcaster
         await self._init_broadcaster(server_args)
-        await self._update_weights_via_nccl()
 
     async def _wait_for_vllm_ready(self, base_url: str, api_key: str) -> None:
         """
