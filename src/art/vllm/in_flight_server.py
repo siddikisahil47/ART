@@ -25,7 +25,11 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, decorate_logs
 
+from art.vllm.patches import patch_lora_runtime_reload
+
 logger = init_logger("vllm.entrypoints.openai.api_server")
+
+patch_lora_runtime_reload()
 
 
 # copied from vllm/entrypoints/openai/api_server.py

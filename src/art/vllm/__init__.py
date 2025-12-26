@@ -12,6 +12,9 @@ from .engine import (
 # Patches - these are typically imported for their side effects
 from .patches import (
     patch_listen_for_disconnect,
+    patch_load_lora_adapter,
+    patch_lora_cache_manager,
+    patch_lora_runtime_reload,
     patch_tool_parser_manager,
     subclass_chat_completion_request,
 )
@@ -34,5 +37,8 @@ __all__ = [
     # Patches
     "subclass_chat_completion_request",
     "patch_listen_for_disconnect",
+    "patch_load_lora_adapter",
+    "patch_lora_cache_manager",
+    "patch_lora_runtime_reload",
     "patch_tool_parser_manager",
 ]
