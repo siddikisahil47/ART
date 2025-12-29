@@ -262,7 +262,7 @@ async def rollout(model: art.Model, scenario: Scenario2048) -> art.Trajectory:
                 max_completion_tokens=128,
                 messages=messages,
                 model=model.get_inference_name(),
-                logprobs=True,
+                # logprobs=True,
             )
         except Exception as e:
             logger.warning(f"Exception generating chat completion: {e}")

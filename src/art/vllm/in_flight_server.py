@@ -7,11 +7,27 @@ from typing import Any, AsyncIterator, Optional
 
 import uvloop
 from fastapi import Request
-from vllm import AsyncEngineArgs, envs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server
-from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.openai.api_server import (
+
+# Apply patches before importing vllm.entrypoints.openai modules
+from art.vllm.patches import (
+    patch_listen_for_disconnect,
+    patch_lora_runtime_reload,
+    patch_tool_parser_manager,
+    subclass_chat_completion_request,
+)
+
+patch_listen_for_disconnect()
+patch_lora_runtime_reload()
+patch_tool_parser_manager()
+# We must subclass ChatCompletionRequest before importing api_server
+# or logprobs will not always be returned
+subclass_chat_completion_request()
+
+from vllm import AsyncEngineArgs, envs  # noqa: E402
+from vllm.engine.protocol import EngineClient  # noqa: E402
+from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server  # noqa: E402
+from vllm.entrypoints.launcher import serve_http  # noqa: E402
+from vllm.entrypoints.openai.api_server import (  # noqa: E402
     build_app,
     build_async_engine_client_from_engine_args,
     init_app_state,
@@ -19,17 +35,16 @@ from vllm.entrypoints.openai.api_server import (
     maybe_register_tokenizer_info_endpoint,
     setup_server,
 )
-from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
-from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, decorate_logs
-
-from art.vllm.patches import patch_lora_runtime_reload
+from vllm.entrypoints.openai.cli_args import (  # noqa: E402
+    make_arg_parser,
+    validate_parsed_serve_args,
+)
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager  # noqa: E402
+from vllm.logger import init_logger  # noqa: E402
+from vllm.usage.usage_lib import UsageContext  # noqa: E402
+from vllm.utils import FlexibleArgumentParser, decorate_logs  # noqa: E402
 
 logger = init_logger("vllm.entrypoints.openai.api_server")
-
-patch_lora_runtime_reload()
 
 
 # copied from vllm/entrypoints/openai/api_server.py
