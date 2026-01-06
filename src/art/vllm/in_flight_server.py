@@ -1,12 +1,12 @@
-import multiprocessing
-import os
 from argparse import Namespace
 from contextlib import asynccontextmanager
+import multiprocessing
 from multiprocessing import forkserver
+import os
 from typing import Any, AsyncIterator, Optional
 
-import uvloop
 from fastapi import Request
+import uvloop
 
 # Apply patches before importing vllm.entrypoints.openai modules
 from art.vllm.patches import (
@@ -23,26 +23,27 @@ patch_tool_parser_manager()
 # or logprobs will not always be returned
 subclass_chat_completion_request()
 
-from vllm import AsyncEngineArgs, envs  # noqa: E402
+from vllm.engine.arg_utils import AsyncEngineArgs  # noqa: E402
 from vllm.engine.protocol import EngineClient  # noqa: E402
-from vllm.entrypoints.cli.serve import run_headless, run_multi_api_server  # noqa: E402
 from vllm.entrypoints.launcher import serve_http  # noqa: E402
 from vllm.entrypoints.openai.api_server import (  # noqa: E402
     build_app,
     build_async_engine_client_from_engine_args,
     init_app_state,
     load_log_config,
-    maybe_register_tokenizer_info_endpoint,
     setup_server,
 )
 from vllm.entrypoints.openai.cli_args import (  # noqa: E402
     make_arg_parser,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager  # noqa: E402
+import vllm.envs as envs  # noqa: E402
 from vllm.logger import init_logger  # noqa: E402
+from vllm.reasoning import ReasoningParserManager  # noqa: E402
+from vllm.tool_parsers import ToolParserManager  # noqa: E402
 from vllm.usage.usage_lib import UsageContext  # noqa: E402
-from vllm.utils import FlexibleArgumentParser, decorate_logs  # noqa: E402
+from vllm.utils.argparse_utils import FlexibleArgumentParser  # noqa: E402
+from vllm.utils.system_utils import decorate_logs  # noqa: E402
 
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
@@ -67,7 +68,8 @@ async def run_custom_server_worker(
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
-    server_index = client_config.get("client_index", 0) if client_config else 0
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
@@ -78,7 +80,6 @@ async def run_custom_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
-        maybe_register_tokenizer_info_endpoint(args)
         app = build_app(args)
 
         @app.post("/init_broadcaster")
@@ -109,10 +110,13 @@ async def run_custom_server_worker(
             )
             return {"status": "ok"}
 
-        vllm_config = await engine_client.get_vllm_config()
-        await init_app_state(engine_client, vllm_config, app.state, args)
+        await init_app_state(engine_client, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index, listen_address)
+        logger.info(
+            "Starting vLLM API server %d on %s",
+            engine_client.vllm_config.parallel_config._api_process_rank,
+            listen_address,
+        )
         shutdown_task = await serve_http(
             app,
             sock=sock,
@@ -164,6 +168,10 @@ async def build_custom_async_engine_client(
     # Add NCCLWeightUpdateWorker to engine
     engine_args.worker_extension_cls = "art.vllm.nccl_worker.NCCLWeightUpdateWorker"
 
+    if client_config:
+        engine_args._api_process_count = client_config.get("client_count", 1)
+        engine_args._api_process_rank = client_config.get("client_index", 0)
+
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
 
@@ -189,14 +197,7 @@ def server():
     if hasattr(args, "model_tag") and args.model_tag is not None:
         args.model = args.model_tag
 
-    if args.headless or args.api_server_count < 1:
-        run_headless(args)
-    else:
-        if args.api_server_count > 1:
-            run_multi_api_server(args)
-        else:
-            # Single API server (this process).
-            uvloop.run(run_custom_server(args))
+    uvloop.run(run_custom_server(args))
 
 
 if __name__ == "__main__":

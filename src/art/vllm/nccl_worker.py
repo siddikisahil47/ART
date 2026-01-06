@@ -4,7 +4,7 @@ import torch
 from torch.nn import Module
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
-from vllm.lora.models import LoRAModel
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.v1.worker.gpu_worker import Worker
