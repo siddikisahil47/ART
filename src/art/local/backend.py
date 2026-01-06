@@ -151,6 +151,8 @@ class LocalBackend(Backend):
 
                 service_class = TorchtuneService
             elif config.get("_async_rl", False):
+                from ..unsloth.async_service import AsyncService
+
                 service_class = AsyncService
                 logger.info("[BACKEND] Using AsyncService")
             else:
