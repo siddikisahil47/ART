@@ -334,7 +334,7 @@ async def main(
     # Declare the model
     logger.info("[1] Creating TrainableModel with AsyncService configuration...")
     model = art.TrainableModel(
-        name="agent-002",
+        name="agent-004",
         project="pipeline-rl-test",
         base_model="OpenPipe/Qwen3-14B-Instruct",
         _internal_config=InternalModelConfig(
